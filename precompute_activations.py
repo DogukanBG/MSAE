@@ -202,7 +202,6 @@ class ImageNetDataset(HFDataset):
             
             if isinstance(sample, Image.Image):
                 sample = sample.convert("RGB")
-                
             if self.preprocess:
                 sample = self.preprocess(sample)
             return sample, target
@@ -342,8 +341,6 @@ class EmbeddingExtractor:
             if not isinstance(img, torch.Tensor):
                 img = self.preprocessor(img)
             
-            img = img.to(self.device)
-
         if img.ndim == 3:
             img = img.unsqueeze(0)
         

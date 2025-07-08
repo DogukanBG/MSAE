@@ -13,7 +13,7 @@
 </div>
 
 <div align="center">
-    <img src="static/International_Conference_on_Machine_Learning.png" style="max-width: 300px; width: 50%;" />
+    <img src="static/International_Conference_on_Machine_Learning.svg" style="max-width: 300px; width: 50%;" />
     <h2>:rocket: International Conference on Machine Learning 2025 :rocket:</h2>
 </div>
 
@@ -121,7 +121,7 @@ python -dt cc3m_ViT-L~14_train_image_2905936_768.npy \
        --expansion_factor 8 --epochs 30 MSAE_UW -a ""
 ```
 
-**NOTE**: Models trained for our paper can be downloaded <span style="color: red"> TODO </span>.
+**NOTE**: Models trained for our paper can be downloaded from this huggingface repository: [Matryoshka SAE Models](https://huggingface.co/WolodjaZ/MSAE). We plan to also add all trained SAE from other tested architectures, so please check the repository for updates.
 
 ## Notes on Model Training
 
@@ -135,7 +135,7 @@ After our ICML paper publication, we discovered several training updates that im
 To evaluate the model similarly to the paper, we provide 3 evaluation scripts:
 
 - `extract_sae_embeddings.py`: Evaluates the model on the provided dataset's precomputed activations and saves the SAE activations to a file.
-- `score_topk_sae_embeddings.py`: Evaluates the model on the provided dataset's precomputed activations. The evaluation is done by constraining SAE activations with TopK and evaluation is done on increasing **k** active SAE neurons. The evaluation metrics are computed for each **k** and saved to a file. 
+- `score_topk_sae_embeddings.py`: Evaluates the model on the provided dataset's precomputed activations. The evaluation is done by constraining SAE activations with TopK and evaluation is done on increasing **k** active SAE neurons. The evaluation metrics are computed for each **k** and saved to a file.
 - `sae_naming.py`: Calculates the similarity matrix of the SAE activations to the provided precomputed vocabularies and saves the results to a file, similarly to how it was done in [Discover-then-Name: Task-Agnostic Concept Bottlenecks via Automated Concept Discovery](https://arxiv.org/abs/2407.14499).
 - `alignment_metric.py`: Calculates the alignment metric between the decoder/encoder of two differently seeded SAE models based on [Sparse Autoencoders Trained on the Same Data Learn Different Features](https://arxiv.org/abs/2501.16615).
 - `linear_eval.py`: Trains a linear classifier using CLIP activations. It then evaluates the model's performance by comparing reconstructed SAE representations to the original CLIP representations, using KL divergence and accuracy metrics. Training was performed on ImageNet-1K.
@@ -154,4 +154,3 @@ If you use this code in your research, please cite our paper:
   year={2025}
 }
 ```
-

@@ -1,4 +1,3 @@
-import sys
 import math
 import warnings
 from tqdm import tqdm
@@ -99,7 +98,7 @@ class SAEDataset(torch.utils.data.Dataset):
                 total += (end - start)
 
             avg_squared_norm = squared_norm_sum / total
-            self.scaling_factor = float(self.target_norm / avg_squared_norm)
+            self.scaling_factor = float(self.target_norm / np.sqrt(avg_squared_norm))
         else:
             self.scaling_factor = 1.0
 
@@ -148,7 +147,9 @@ class SAEDataset(torch.utils.data.Dataset):
         Returns:
             torch.Tensor: Preprocessed data sample
         """
-        return self.process_data(torch.tensor(self.data[idx]).to(self.dtype))
+        torch_data = torch.tensor(self.data[idx])
+        output = self.process_data(torch_data.clone())
+        return output.to(self.dtype)
 
 
 class LinearDecayLR(torch.optim.lr_scheduler.LambdaLR):

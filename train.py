@@ -185,8 +185,7 @@ def main(args):
     logger.info(f"Training dataset mean center: {train_ds.mean.mean()}, Scaling factor: {train_ds.scaling_factor} with target norm {train_ds.target_norm}")
     logger.info(f"Evaluation dataset mean center: {eval_ds.mean.mean()}, Scaling factor: {eval_ds.scaling_factor} with target norm {eval_ds.target_norm}")
     assert train_ds.vector_size == eval_ds.vector_size, "Training and evaluation datasets must have the same embedding size"
-    
-    if dataset_second_modality is not None:
+    if args.dataset_second_modality is not None:
         eval_ds_second = SAEDataset(
             args.dataset_second_modality,
             dtype=cfg.training.dtype,
@@ -318,7 +317,7 @@ def main(args):
         num_workers=cfg.training.num_workers, 
         shuffle=False
     )
-    if dataset_second_modality is not None:
+    if args.dataset_second_modality is not None:
         eval_loader_second = torch.utils.data.DataLoader(
             eval_ds_second,
             batch_size=cfg.training.batch_size,
@@ -401,7 +400,11 @@ def main(args):
             # Sparsity measurements
             sparsity_sparse = (repr_sparse == 0.0).float().mean(axis=-1).mean()
             sparsity_all = (repr_all == 0.0).float().mean(axis=-1).mean()
-            
+
+            # Representation Metrics
+            repr_norm = repr_all.norm(dim=-1).mean().item()
+            repr_max = repr_all.max(dim=-1).values.mean().item()
+
             # Check for dead neurons periodically
             if global_step % cfg.training.check_dead == 0:
                 activations = model.get_and_reset_stats()
@@ -417,7 +420,7 @@ def main(args):
                 logger.info(f"Cosine Similarity Sparse: {diagonal_cs_sparse:.4f}, MAE Distance Sparse: {mae_distance_sparse:.4f}")
                 logger.info(f"Cosine Similarity All: {diagonal_cs_all:.4f}, MAE Distance All: {mae_distance_all:.4f}")
                 logger.info(f"Sparsity Sparse: {sparsity_sparse:.4f}, Sparsity All: {sparsity_all:.4f}")
-                logger.info(f"Orthogonal Decoder Loss: {od:.6f}")
+                logger.info(f"Orthogonal Decoder Loss: {od:.6f}, Representation norm {repr_norm:.4f} and max {repr_max:.2f}")
         
         # Update learning rate
         if scheduler:
@@ -430,7 +433,7 @@ def main(args):
         # Evaluate the model on the validation set
         eval(model, eval_loader, loss_fn, device, cfg)
 
-        if dataset_second_modality is not None:
+        if args.dataset_second_modality is not None:
             # Evaluate on the second modality dataset
             eval(model, eval_loader_second, loss_fn, device, cfg)
     

@@ -47,8 +47,8 @@ def parse_args() -> argparse.Namespace:
                        help="Random seed for reproducibility")
     parser.add_argument("-w", "--num-workers", type=int, default=12, 
                        help="Number of worker processes for data loading")
-    parser.add_argument("--use-bias", action='store_true',
-                       help="Use bias in the similarity computation (default: False)")
+    parser.add_argument("--patch-diff", default=True,
+                       help="Remove zero sae activation reconstruction vector")
     parser.add_argument("--verbose", action='store_true', help="Print found matches")
     return parser.parse_args()
 
@@ -82,7 +82,7 @@ def compute_similarities(
     model: torch.nn.Module, 
     dataset: torch.utils.data.Dataset, 
     batch_size: int,
-    use_bias: bool = False,
+    patch_diff: bool = True,
     num_workers: int = 6
 ) -> np.ndarray:
     """
@@ -100,8 +100,8 @@ def compute_similarities(
         dataset (torch.utils.data.Dataset): Dataset containing input vectors
         batch_size (int): Batch size for processing
         num_workers (int): Number of data loading worker processes
-        use_bias (bool): In the `https://arxiv.org/abs/2407.14499` paper they didn't use bias
-                         but you can use it if you want to (default: False)
+        patch_diff (bool): In the `https://arxiv.org/abs/2407.14499` paper they didn't do it 
+                            however we find it more interpretable (default: True)
         
     Returns:
         tuple: (standard_similarity_matrix, bias_similarity_matrix)
@@ -117,13 +117,11 @@ def compute_similarities(
     )
     
     # Get decoder search space (the learned feature vectors)
-    # import pdb; pdb.set_trace()
-    decoded_search_space = model.model.decoder.data
-    if use_bias:
-        decoded_search_space = decoded_search_space + model.model.pre_bias
-    
-    logger.info(f"Bias Norm: {model.model.pre_bias.norm()}")
+    decoded_search_space = model.model.decoder.data + model.model.pre_bias
     decoded_search_space = model.postprocess(decoded_search_space)
+    if patch_diff:
+        zero_space = model.decode(torch.zeros(1,model.latent_dim, dtype=decoded_search_space.dtype, device=decoded_search_space.device))
+        decoded_search_space -= zero_space
     logger.info(f"Input features: {len(dataset)}, Decoder features: {decoded_search_space.shape[0]}")
     
     # Initialize storage for similarity scores
@@ -171,7 +169,8 @@ def main(args):
     # Compute both types of similarity matrices
     standard_matrix = compute_similarities(
         model, 
-        dataset, 
+        dataset,
+        patch_diff=args.patch_diff,
         batch_size=args.batch_size,
         num_workers=args.num_workers
     )

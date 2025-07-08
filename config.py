@@ -57,7 +57,7 @@ class LossConfig:
         sparse_loss (str): Type of sparsity loss ('l1' for L1 norm).
         sparse_weight (float): Weight coefficient for the sparsity loss term.
     """
-    reconstruction_loss: str = "nmse"
+    reconstruction_loss: str = "mse"
     sparse_loss: str = "l1"
     sparse_weight: float = 0.0
 
@@ -91,7 +91,7 @@ class ModelConfig:
     latent_soft_cap: float = 0.0
     nesting_list: Union[List[int], int] = 32
     relative_importance: Union[List[int], str] = "UW"
-    max_nesting: int = 0
+    max_nesting: int = 256#512
 
 # Helper functions to create default instances
 def default_relusae_training() -> TrainConfig:
