@@ -6,6 +6,24 @@ import torch
 import random
 import numpy as np
 
+from torchvision.models import resnet50, convnext_tiny, vit_b_16
+from typing import Dict, Any, Optional, Tuple
+import torch.nn as nn
+from torch.utils.data import DataLoader
+import torchvision
+import torchvision.transforms as transforms
+import torch
+from tqdm import tqdm
+
+import os
+import pandas as pd
+
+import copy
+
+from polychannels import RESNET_POLY_CHANNELS_0_01, RESNET_POLY_CHANNELS_0_02, RESNET_POLY_CHANNELS_0_03, RESNET_MULTI_POLY_CHANNELS_0_03, RESNET_MULTI_POLY_CHANNELS_0_02, RESNET_MULTI_POLY_CHANNELS_0_01, VIT_MULTI_POLY_CHANNELS_0_01, VIT_MULTI_POLY_CHANNELS_0_02, VIT_MULTI_POLY_CHANNELS_0_03, DINOv2
+
+
+
 """
 Sparse Autoencoder (SAE) Utilities
 
@@ -13,6 +31,364 @@ This module provides utility functions and classes for training and using
 Sparse Autoencoders, including dataset handling, learning rate schedulers,
 custom activation functions, and various mathematical operations.
 """
+
+def set_layer_by_path(model, path, new_layer):
+    """Set a layer in model using dot notation path"""
+    parts = path.split('.')
+    current = model
+    
+    # Navigate to parent of target layer
+    for part in parts[:-1]:
+        if part.isdigit():
+            current = current[int(part)]
+        else:
+            current = getattr(current, part)
+    
+    # Set the final layer
+    final_part = parts[-1]
+    if final_part.isdigit():
+        current[int(final_part)] = new_layer
+    else:
+        setattr(current, final_part, new_layer)
+
+
+def get_layer_by_path(model, path):
+    """Navigate to a layer using dot notation path."""
+    parts = path.split('.')
+    current = model
+    
+    for part in parts:
+        if part.isdigit():
+            current = current[int(part)]
+        else:
+            current = getattr(current, part)
+    
+    return current
+
+class MultiClassTrainingModel(torch.nn.Module):
+    def __init__(self, channel_of_interest, input_channels, kernel_size, stride, num_classes, padding=0, bias=False):
+        super(MultiClassTrainingModel, self).__init__()
+
+        self.disentangled = nn.Conv2d(input_channels, num_classes+1, kernel_size=kernel_size, stride=stride, bias=bias, padding=padding)
+        self.merged = nn.Conv2d(num_classes+1, 1, kernel_size=1, stride=1, bias=False)
+        merged_weight = self.merged.weight.clone()
+        for i in range(num_classes):
+            merged_weight[0,i,0,0] = 1.
+        merged_weight[0,num_classes,0,0] = -1.
+        self.merged.weight = nn.Parameter(merged_weight)
+
+        self.channel_of_interest = channel_of_interest
+
+    def forward(self, x):
+
+        disentangled = self.disentangled(x)
+        merged = self.merged(disentangled)
+
+        return merged, disentangled
+
+
+class MultiClassTrainingModelViT(torch.nn.Module):
+    def __init__(self, channel_of_interest, input_channels, num_classes, bias=False):
+        super(MultiClassTrainingModelViT, self).__init__()
+
+        self.disentangled = nn.Linear(input_channels, num_classes+1, bias=bias)
+        self.merged = nn.Linear(num_classes+1, 1, bias=bias)
+        merged_weight = self.merged.weight.clone()
+        for i in range(num_classes):
+            merged_weight[0,i] = 1.
+        merged_weight[0,num_classes] = -1.
+        self.merged.weight = nn.Parameter(merged_weight)
+
+        self.channel_of_interest = channel_of_interest
+
+    def forward(self, x):
+
+        disentangled = self.disentangled(x)
+        merged = self.merged(disentangled)
+
+        return merged, disentangled
+
+def load_multi_disentangled_resnet(model, layer_path, channel_of_interest, classes, device="cuda:0", f=None, model_dir='/data/vimb06/resnet_store_dir/models_disentangled'):
+    model = model.to(device)
+    print(channel_of_interest, len(classes))
+    
+    model_disentangled_final = copy.deepcopy(model)
+    model_disentangled_final = model_disentangled_final.to(device)
+    model_disentangled_final.eval()
+    
+    model_type = 'resnet50'
+    model_disentangled = MultiClassTrainingModel(channel_of_interest, 512, 1, 1, num_classes=len(classes)).to(device)
+    model_disentangled = model_disentangled.to(device)
+
+    f = f
+    if f == None:
+        f = '_best'
+
+    model_disentangled.load_state_dict(torch.load(os.path.join(model_dir, model_type + '_channel' + str(channel_of_interest) + '_f' + str(f) + '_unnormalized.pth')))
+    model_layer = get_layer_by_path(model, layer_path)
+    iden = None
+
+    if isinstance(model_layer, nn.Sequential):
+        iden = model_layer[1]
+        model_layer = model_layer[0]
+    in_channels, out_channels = model_layer.in_channels, model_layer.out_channels
+
+    model_disentangled_final_layer = get_layer_by_path(model_disentangled_final, layer_path)
+    model_disentangled_final_layer = nn.Sequential(
+            nn.Conv2d(512, out_channels+len(classes), kernel_size=1, stride=1, bias=False),
+            nn.Conv2d(out_channels+len(classes), 2048, kernel_size=1, stride=1, bias=False)
+    ).to(device)
+
+    new_weight_Lmin1_L = model_layer.weight.clone() #model.layer4[2].conv3.weight.clone()
+
+    new_weight_Lmin1_L[channel_of_interest, :,:,:] = model_disentangled.disentangled.weight[0,:,:,:].clone()
+    for i in range(1, len(classes)+1):
+        new_weight_Lmin1_L = torch.cat([new_weight_Lmin1_L,model_disentangled.disentangled.weight[i:i+1,:,:,:].clone()], dim=0) 
+
+    model_disentangled_final_layer[0].weight = nn.Parameter(new_weight_Lmin1_L)
+
+    if not iden is None:
+        prev_identity = iden.weight.clone()  # Copy previous identity matrix
+        identity = torch.zeros((2048, out_channels+len(classes), 1, 1)).to(device)
+        identity[:prev_identity.shape[0], :prev_identity.shape[1], :, :] = prev_identity
+    else:
+        identity = torch.zeros((2048, out_channels+len(classes), 1, 1)).to(device)
+        for i in range(out_channels):
+            identity[i,i,0,0] = 1.
+
+    for i in range(len(classes)):
+        identity[channel_of_interest,out_channels+i,0,0] = 1. 
+    
+    identity[channel_of_interest,out_channels+len(classes)-1,0,0] = -1. * (len(classes)-1)
+    #model_disentangled_final.layer4[2].conv3[1].weight = nn.Parameter(identity)
+    model_disentangled_final_layer[1].weight = nn.Parameter(identity)
+    set_layer_by_path(model_disentangled_final, layer_path, model_disentangled_final_layer)
+    return model_disentangled_final
+
+def load_fully_multi_disentangled_resnet(tau=0.03):
+    model = torchvision.models.resnet50(pretrained=True)
+    layer_path = 'layer4.2.conv3'
+    channel_to_disentangle = None
+    model_dir = '/scratch/inf0/user/dbagci/resnet50/models_disentangled'
+    if tau==0.03:
+        channel_to_disentangle = RESNET_MULTI_POLY_CHANNELS_0_03
+        model_dir = '/scratch/inf0/user/dbagci/resnet50/models_disentangled_0.03'
+    elif tau==0.02:
+        channel_to_disentangle = RESNET_MULTI_POLY_CHANNELS_0_02
+        model_dir = '/scratch/inf0/user/dbagci/resnet50/models_disentangled_0.02'
+    elif tau==0.01:
+        channel_to_disentangle = RESNET_MULTI_POLY_CHANNELS_0_01
+        model_dir = '/scratch/inf0/user/dbagci/resnet50/models_disentangled_0.01'
+    else:
+        assert False, "Tau not available"
+
+    model2 = copy.deepcopy(model).to("cuda:0")
+    random_input = torch.randn((1,3,224,224)).to("cuda:0")
+    for entry in channel_to_disentangle:
+        set_of_classes = channel_to_disentangle[entry]
+
+        model = load_multi_disentangled_resnet(model, layer_path, int(entry), set_of_classes, model_dir=model_dir).to("cuda:0")
+        #print('Are equal:')
+        #print(torch.isclose(model(random_input), model2(random_input), atol=1e-03).all())
+        #print(model.layer4[2].conv3[0])
+        #print(model.layer4[2].conv3[0].weight.shape)
+        layer_path = 'layer4.2.conv3' 
+    
+    return model, 'layer4.2.conv3.0'
+
+def load_multi_disentangled_vit(model, layer_path, channel_of_interest, classes, device="cuda:0", f=None, model_dir='/data/vimb06/resnet_store_dir/models_disentangled'):
+    model = model.to(device)
+    
+    model_disentangled_final = copy.deepcopy(model)
+    model_disentangled_final = model_disentangled_final.to(device)
+    model_disentangled_final.eval()
+    
+    model_type = 'vitb16'
+    model_disentangled = MultiClassTrainingModelViT(channel_of_interest, 3072, num_classes=len(classes)).to(device)
+    model_disentangled = model_disentangled.to(device)
+
+    f = f
+    if f == None:
+        f = '_best'
+
+    if "0.01" in model_dir:
+        model_type = 'vitb16_cls'#model_dir=model_dir.replace("vitb16", "vitb16_cls")
+        model_disentangled.load_state_dict(torch.load(os.path.join(model_dir, model_type + '_channel' + str(channel_of_interest) + '_f' + str(f) + '_unnormalized.pth')))
+    else:
+        model_disentangled.load_state_dict(torch.load(os.path.join(model_dir, model_type + '_channel' + str(channel_of_interest) + '_f' + str(f) + '_unnormalized.pth')))
+    model_layer = get_layer_by_path(model, layer_path)
+    iden = None
+
+    if isinstance(model_layer, nn.Sequential):
+        iden = model_layer[1]
+        model_layer = model_layer[0]
+    in_channels, out_channels = model_layer.in_features, model_layer.out_features
+
+    model_disentangled_final_layer = get_layer_by_path(model_disentangled_final, layer_path)
+    model_disentangled_final_layer = nn.Sequential(
+            nn.Linear(3072, out_channels+len(classes), bias=True),
+            nn.Linear(out_channels+len(classes), 768, bias=False)
+    ).to(device)
+
+    new_weight_Lmin1_L = model_layer.weight.clone() #model.layer4[2].conv3.weight.clone()
+
+    new_weight_Lmin1_L[channel_of_interest, :] = model_disentangled.disentangled.weight[0,:].clone()
+    for i in range(1, len(classes)+1):
+        new_weight_Lmin1_L = torch.cat([new_weight_Lmin1_L,model_disentangled.disentangled.weight[i:i+1,:].clone()], dim=0) 
+
+    model_disentangled_final_layer[0].weight = nn.Parameter(new_weight_Lmin1_L)
+    
+    if model_layer.bias is not None:
+        new_bias = model_layer.bias.clone()
+        # Add bias for the new disentangled neurons (len(classes) new neurons total)
+        # All new neurons get the bias from the original channel_of_interest
+        for i in range(len(classes)):
+            new_bias = torch.cat([new_bias, model_layer.bias[channel_of_interest:channel_of_interest+1].clone()], dim=0)
+        model_disentangled_final_layer[0].bias = nn.Parameter(new_bias)
+    
+    if not iden is None:
+        prev_identity = iden.weight.clone()  # Copy previous identity matrix
+        identity = torch.zeros((768, out_channels+len(classes))).to(device)
+        identity[:prev_identity.shape[0], :prev_identity.shape[1]] = prev_identity
+    else:
+        identity = torch.zeros((768, out_channels+len(classes))).to(device)
+        for i in range(out_channels):
+            identity[i,i] = 1.
+
+    for i in range(len(classes)):
+        identity[channel_of_interest,out_channels+i] = 1. 
+    
+    identity[channel_of_interest,out_channels+len(classes)-1] = -1. * (len(classes)-1)
+    #model_disentangled_final.layer4[2].conv3[1].weight = nn.Parameter(identity)
+    model_disentangled_final_layer[1].weight = nn.Parameter(identity)
+    set_layer_by_path(model_disentangled_final, layer_path, model_disentangled_final_layer)
+    return model_disentangled_final
+
+
+def load_fully_multi_disentangled_vit(tau=0.03):
+    model = torchvision.models.vit_b_16(pretrained=True)
+    layer_path = 'encoder.layers.encoder_layer_11.mlp.3'
+    channel_to_disentangle = None
+    model_dir = '/scratch/inf0/user/dbagci/vitb16/models_disentangled'
+    if tau==0.03:
+        channel_to_disentangle = VIT_MULTI_POLY_CHANNELS_0_03
+        model_dir = '/scratch/inf0/user/dbagci/vitb16/models_disentangled_0.03'
+    elif tau==0.02:
+        channel_to_disentangle = VIT_MULTI_POLY_CHANNELS_0_02
+        model_dir = '/scratch/inf0/user/dbagci/vitb16/models_disentangled'
+    elif tau==0.01:
+        model_dir = '/scratch/inf0/user/dbagci/vitb16/models_disentangled_0.01/models_disentangled_0.01'
+        channel_to_disentangle = VIT_MULTI_POLY_CHANNELS_0_01
+    else:
+        assert False, "Tau not available"
+
+    model2 = copy.deepcopy(model).to("cuda:0")
+    random_input = torch.randn((1,3,224,224)).to("cuda:0")
+    for entry in channel_to_disentangle:
+        set_of_classes = channel_to_disentangle[entry]
+
+        model = load_multi_disentangled_vit(model, layer_path, int(entry), set_of_classes, model_dir=model_dir).to("cuda:0")
+        print('Are equal:')
+        print(torch.isclose(model(random_input), model2(random_input), atol=1e-03).all())
+        #print(model.layer4[2].conv3[0])
+        #print(model.layer4[2].conv3[0].weight.shape)
+        layer_path = 'encoder.layers.encoder_layer_11.mlp.3' 
+    
+    return model, 'encoder.layers.encoder_layer_11.mlp.3'
+
+
+def load_multi_disentangled_dinov2(model, layer_path, channel_of_interest, classes, device="cuda:0", f=None, model_dir='/data/vimb06/resnet_store_dir/models_disentangled'):
+    model = model.to(device)
+    
+    model_disentangled_final = copy.deepcopy(model)
+    model_disentangled_final = model_disentangled_final.to(device)
+    model_disentangled_final.eval()
+    
+    model_type = 'dinov2'
+    model_disentangled = MultiClassTrainingModelViT(channel_of_interest, 4096, num_classes=len(classes), bias=True).to(device)
+    model_disentangled = model_disentangled.to(device)
+
+    f = f
+    if f == None:
+        f = '_best'
+
+    model_disentangled.load_state_dict(torch.load(os.path.join(model_dir, model_type + '_channel' + str(channel_of_interest) + '_f' + str(f) + '_unnormalized.pth')))
+    model_layer = get_layer_by_path(model, layer_path)
+    iden = None
+
+    if isinstance(model_layer, nn.Sequential):
+        iden = model_layer[1]
+        model_layer = model_layer[0]
+    in_channels, out_channels = model_layer.in_features, model_layer.out_features
+
+    model_disentangled_final_layer = get_layer_by_path(model_disentangled_final, layer_path)
+    model_disentangled_final_layer = nn.Sequential(
+            nn.Linear(3072, out_channels+len(classes), bias=True),
+            nn.Linear(out_channels+len(classes), 768, bias=False)
+    ).to(device)
+
+    new_weight_Lmin1_L = model_layer.weight.clone() #model.layer4[2].conv3.weight.clone()
+
+    new_weight_Lmin1_L[channel_of_interest, :] = model_disentangled.disentangled.weight[0,:].clone()
+    for i in range(1, len(classes)+1):
+        new_weight_Lmin1_L = torch.cat([new_weight_Lmin1_L,model_disentangled.disentangled.weight[i:i+1,:].clone()], dim=0) 
+
+    model_disentangled_final_layer[0].weight = nn.Parameter(new_weight_Lmin1_L)
+    
+    if model_layer.bias is not None:
+        new_bias = model_layer.bias.clone()
+        # Add bias for the new disentangled neurons (len(classes) new neurons total)
+        # All new neurons get the bias from the original channel_of_interest
+        for i in range(len(classes)):
+            new_bias = torch.cat([new_bias, model_layer.bias[channel_of_interest:channel_of_interest+1].clone()], dim=0)
+        model_disentangled_final_layer[0].bias = nn.Parameter(new_bias)
+    
+    if not iden is None:
+        prev_identity = iden.weight.clone()  # Copy previous identity matrix
+        identity = torch.zeros((1024, out_channels+len(classes))).to(device)
+        identity[:prev_identity.shape[0], :prev_identity.shape[1]] = prev_identity
+    else:
+        identity = torch.zeros((1024, out_channels+len(classes))).to(device)
+        for i in range(out_channels):
+            identity[i,i] = 1.
+
+    for i in range(len(classes)):
+        identity[channel_of_interest,out_channels+i] = 1. 
+    
+    identity[channel_of_interest,out_channels+len(classes)-1] = -1. * (len(classes)-1)
+    #model_disentangled_final.layer4[2].conv3[1].weight = nn.Parameter(identity)
+    model_disentangled_final_layer[1].weight = nn.Parameter(identity)
+    set_layer_by_path(model_disentangled_final, layer_path, model_disentangled_final_layer)
+    return model_disentangled_final
+
+
+def load_fully_multi_disentangled_dinov2(model, tau=0.03):
+    layer_path = "blocks.23.mlp.fc2"
+    channel_to_disentangle = None
+    model_dir = "/BS/disentanglement/work/models_disentangled_0.03_recon_loss/"
+    if tau==0.03:
+        channel_to_disentangle = DINOv2
+        model_dir = "/BS/disentanglement/work/models_disentangled_0.03_recon_loss/"#"/BS/disentanglement/work/unsupervised/dinov2/clustering_0/adaptive_kmeans/models_disentangled_0.02_recon_loss/"
+    elif tau==0.02:
+        channel_to_disentangle = {"139": [1996, 1292], "275": [1424, 1600, 1996], "471": [872, 1825, 1618, 1424], "718": [1545, 1714], "870": [1898, 1852], "901": [1652, 1556], "1018": [1874, 943]}
+        model_dir = "/BS/disentanglement/work/unsupervised/dinov2/clustering_0/adaptive_kmeans/models_disentangled_0.02_recon_loss/"
+    else:
+        assert False, "Tau not available"
+
+    model2 = copy.deepcopy(model).to("cuda:0")
+    random_input = torch.randn((1,3,224,224)).to("cuda:0")
+    for entry in channel_to_disentangle:
+        set_of_classes = channel_to_disentangle[entry]
+
+        model = load_multi_disentangled_dinov2(model, layer_path, int(entry), set_of_classes, model_dir=model_dir).to("cuda:0")
+        print('Are equal:')
+        print(torch.isclose(model(random_input), model2(random_input), atol=1e-03).all())
+        #print(model.layer4[2].conv3[0])
+        #print(model.layer4[2].conv3[0].weight.shape)
+        layer_path = "blocks.23.mlp.fc2" 
+    
+    return model, "blocks.23.mlp.fc2"
+
 
 class SAEDataset(torch.utils.data.Dataset):
     """
@@ -34,12 +410,26 @@ class SAEDataset(torch.utils.data.Dataset):
         target_norm (float, optional): Target norm for normalization. If None, uses sqrt(vector_size).
                                      If 0.0, no normalization is applied. Defaults to None.
     """
-    def __init__(self, data_path: str, dtype: torch.dtype = torch.float32, mean_center: bool = False, target_norm: float = None):
+    def __init__(self, data_path: str, dtype: torch.dtype = torch.float32, mean_center: bool = False, target_norm: float = None, split="train", model_type="vit_b_16"):
         # Parse vector dimensions from filename
-        parts = data_path.split("/")[-1].split(".")[0].split("_")
-        self.len, self.vector_size = map(int, parts[-2:])
+        self.len = 50000 if split == "val" else 1281167
+        if model_type == "resnet50":
+            self.vector_size = 2048 
+            if "input" in data_path:
+                self.vector_size = 512
+        elif model_type == "vit_b_16":
+            self.vector_size = 768
+            if "input" in data_path:
+                self.vector_size = 3072
+        else:
+            self.vector_size = 1024
+            if "input" in data_path:
+                self.vector_size = 4096
+        #parts = data_path.split("/")[-1].split(".")[0].split("_")
+        #self.len, self.vector_size = map(int, parts[-2:])
         
         # Set core attributes
+        #print((self.len, self.vector_size))
         self.dtype = dtype
         self.data = np.memmap(data_path, dtype="float32", mode="r", 
                              shape=(self.len, self.vector_size))

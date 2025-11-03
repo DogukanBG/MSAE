@@ -1,653 +1,280 @@
 import os
-import warnings
 import torch
 import argparse
 import logging
 import numpy as np
 from tqdm import tqdm
 from PIL import Image
+from torch.utils.data import DataLoader, Dataset
+import torchvision
+import torchvision.transforms as transforms
+from torchvision.datasets import ImageFolder, CelebA
+import torch.nn as nn
+from imagenet1000_class_names import imagenet1000_class_names
 
-import clip
-from datasets import load_dataset
-from torch.utils.data import Dataset
-from torchvision.datasets import CelebA
-
-from utils import get_device, set_seed
-
-"""
-CLIP Embedding Extraction Utility
-
-This script extracts embeddings from various datasets using the CLIP model.
-It supports multiple datasets and CLIP model variants, and saves the extracted
-embeddings as memory-mapped numpy arrays for efficient storage and access.
-"""
-
-# Supported CLIP model variants
-SUPPORTED_MODELS = [
-    "ViT-B~32",
-    "ViT-B~16",
-    "RN50",
-    "ViT-L~14",
-]
-
-# Supported image datasets
-SUPPORTED_DATASETS = [
-    "imagenet",
-    "cc3m",
-    "celeba",
-]
-
-# Supported text vocabulary sources with their file paths
-SUPPORTED_VOCABS = {
-    "mscoco": "vocab/mscoco_unigram.txt",
-    "laion_unigram": "vocab/laion_400_unigram.txt",
-    "laion_bigrams": "vocab/laion_400_bigram.txt",
-    "laion": ["laion_unigram", "laion_bigrams"],  # Combined vocabulary
-    "disect": "vocab/clip_disect_20k.txt",
-}
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-
-def parse_args() -> argparse.Namespace:
+# -----------------------------
+# Model Loader
+# -----------------------------
+def get_model(model_name: str, device: str):
     """
-    Parse command line arguments for the embedding extraction script.
-    
-    Returns:
-        argparse.Namespace: Parsed command line arguments
+    Returns a model for image embeddings.
     """
-    parser = argparse.ArgumentParser(description="Extract embeddings from the dataset")
-    parser.add_argument("-d", "--dataset", type=str, required=True, 
-                       help="Dataset to use (one of: imagenet, cc3m, celeba, or a supported vocabulary)")
-    parser.add_argument("-m", "--model", type=str, required=True, 
-                       help="CLIP model variant to use (e.g., 'ViT-B~32' for 'ViT-B/32')")
-    parser.add_argument("-b", "--batch-size", type=int, default=4096, 
-                       help="Batch size for embedding extraction")
-    parser.add_argument("-s", "--train-split", action="store_true", 
-                       help="Use training split instead of validation/test split")
-    parser.add_argument("-v", "--vocab-size", type=int, default=-1, 
-                       help="Vocabulary size limit (-1 for full vocabulary)")
-    parser.add_argument("-w", "--workers", type=int, default=12, 
-                       help="Number of workers for data loading")
-    return parser.parse_args()
-
-
-class VocabDataset(Dataset):
-    """
-    Dataset for processing text vocabulary items.
-    
-    This dataset treats each vocabulary entry as a text item to be embedded,
-    with no corresponding image.
-    
-    Args:
-        data (list): List of vocabulary items (strings)
-    """
-    def __init__(self, data):
-        self.data = data
-    
-    def __getitem__(self, index):
-        """Yield vocabulary items with None as placeholder for images."""
-        return None, self.data[index]
-    
-    def __len__(self):
-        """Return the number of vocabulary items."""
-        return len(self.data)
-    
-    def __add__(self, other):
-        """Concatenate two VocabDataset instances."""
-        if isinstance(other, VocabDataset):
-            return VocabDataset(self.data + other.data)
-        else:
-            raise TypeError("Can only concatenate VocabDataset instances")
-
-
-class CelebAMy(Dataset):
-    """
-    Custom wrapper for the CelebA dataset.
-    
-    Combines multiple attribute labels into a comma-separated string
-    to use as the text component for CLIP.
-    
-    Args:
-        root (str): Root directory for CelebA data
-        split (str): Dataset split ('train', 'valid', or 'test')
-        **kwargs: Additional arguments to pass to CelebA constructor
-    """
-    def __init__(self, root, split, **kwargs):
-        self.celeba = CelebA(root, split=split, **kwargs)
-        self.attr_names = self.celeba.attr_names[:40]  # Using first 40 attributes
-    
-    def __getitem__(self, index):
-        """Yield image samples with concatenated attribute labels as text."""
-        sample, target = self.celeba[index]
-        # Get the indices of attributes that are True for this sample
-        labels_by_target = torch.nonzero(target)[:, 0]
-        # Convert attribute indices to attribute names and join with commas
-        target = ','.join([str(self.attr_names[x]) for x in labels_by_target])
-        return sample, target
-    
-    def __len__(self):
-        """Return the number of samples in the dataset."""
-        return len(self.celeba)
-
-
-class HFDataset(Dataset):
-    """
-    Base class for Hugging Face dataset wrappers.
-    
-    Provides common functionality for loading and preprocessing datasets
-    from the Hugging Face hub.
-    
-    Args:
-        dataset (str): Dataset identifier on Hugging Face hub
-        preprocess (callable): Image preprocessing function
-        split (str): Dataset split to use
-        download_full (bool): Whether to download the full dataset at once or stream it
-        **kwargs: Additional arguments to pass to load_dataset
-    """
-    def __init__(self, dataset, preprocess, split, download_full=False, **kwargs):
-        stream = not download_full
-        self.dataset = load_dataset(dataset, split=split, streaming=stream, 
-                                    trust_remote_code=True, **kwargs)
-        self.preprocess = preprocess
-        self.len: int = 0  # Will be set by child classes
-    
-    def __len__(self):
-        """Return the number of samples in the dataset."""
-        return self.len
-    
-    def __getitem__(self, idx):
-        """Get a single sample from the dataset."""
-        item = self.dataset[idx]
-        sample, target = item['jpg'], item['txt']
-        if self.preprocess:
-            sample = self.preprocess(sample)
-        return sample, target
-
-
-class ImageNetDataset(HFDataset):
-    """
-    Wrapper for the ImageNet dataset from Hugging Face.
-    
-    Handles ImageNet-specific data format and preprocessing.
-    
-    Args:
-        preprocess (callable): Image preprocessing function
-        split (str): Dataset split to use ('train' or 'validation')
-    """
-    def __init__(self, preprocess, split):
-        super().__init__("ILSVRC/imagenet-1k", preprocess, split, True)
-        # Set dataset length based on split info
-        self.len = self.dataset.info.splits[self.dataset.split].num_examples
-        # Create mapping from class names to indices
-        self.class_to_idx = {}
-        for idx, class_name in enumerate(self.dataset.info.features['label'].names):
-            self.class_to_idx[class_name] = idx
-    
-    def __getitem__(self, idx):
-        try:
-            item = self.dataset[idx]
-            sample, target = item['image'], item['label']
-            if target == -1:
-                target = ""  # Handle missing labels
-            else:
-                target = self.dataset.info.features['label'].int2str(target)
-            
-            if isinstance(sample, Image.Image):
-                sample = sample.convert("RGB")
-            if self.preprocess:
-                sample = self.preprocess(sample)
-            return sample, target
-        except (UnicodeDecodeError, OSError, SyntaxError) as e:
-            return None, None
-
-class CC3MDataset(HFDataset):
-    """
-    Wrapper for the Conceptual Captions 3M dataset.
-    
-    Handles CC3M-specific data format and preprocessing.
-    
-    Args:
-        preprocess (callable): Image preprocessing function
-        split (str): Dataset split to use ('train' or 'validation')
-        download_full (bool): Whether to download the full dataset at once
-    """
-    def __init__(self, preprocess, split, download_full=False):
-        download_full=True
-        super().__init__("pixparse/cc3m-wds", preprocess, split, download_full)
-        # Hardcoded dataset sizes since they're not always available from the API
-        if split == "train":
-            self.len = 2905954
-        else:
-            self.len = 13443
-    
-    def __getitem__(self, idx):
-        """Return preprocessed image and caption pairs."""
-        try:
-            item = self.dataset[idx]
-            sample, target = item['jpg'], item['txt']
-            if isinstance(sample, Image.Image):
-                sample = sample.convert("RGB")
-            
-            if self.preprocess:
-                sample = self.preprocess(sample)
-            return sample, target
-        except (UnicodeDecodeError, OSError, SyntaxError) as e:
-            return None, None 
-
-
-class EmbeddingExtractor:
-    """
-    Utility for extracting CLIP embeddings from images and text.
-    
-    Handles loading the CLIP model and preprocessing pipeline, and provides
-    methods for embedding both images and text.
-    
-    Args:
-        model_name (str): Name of the CLIP model variant to use
-        device (str): Device to run inference on ('cuda' or 'cpu')
-    """
-    def __init__(self, model_name, device) -> None:
-        self.model_name = model_name
-        self.device = device
-        # Load the model, preprocessor, and tokenizer
-        self.model, self.preprocessor, self.tokenizer, self.token_max_length = self.load_model(
-            model_name, self.device)
-        
-        self.model = self.model.to(self.device)
-        self.model.eval()
-    
-    @staticmethod
-    def load_model(model_name, device, model_path=None):
-        """
-        Load a CLIP model, preprocessor, and tokenizer.
-        
-        Args:
-            model_name (str): Name of the CLIP model variant
-            device (str): Device to load the model on
-            model_path (str, optional): Custom path for model weights
-            
-        Returns:
-            tuple: (model, preprocessor, tokenizer, token_max_length)
-            
-        Raises:
-            ValueError: If the model variant is not supported
-        """
-        if model_name not in SUPPORTED_MODELS:
-            raise ValueError(f"Model {model_name} not supported, please use one of {SUPPORTED_MODELS}")
-        
-        # Replace '~' with '/' in model name (to handle command line limitations)
-        model_name = model_name.replace("~", "/")
-        
-        # Load the model and preprocessor
-        model, preprocessor = clip.load(model_name, device=device, download_root=model_path)
-        
-        # Create a tokenizer that truncates by default
-        original_tokenizer = clip.tokenize
-        tokenizer = lambda x: original_tokenizer(x, truncate=True)
-        token_max_length = 77  # Standard context length for CLIP
-            
-        return model, preprocessor, tokenizer, token_max_length
-    
-    def embed_text(self, text):
-        """
-        Extract text embeddings using the CLIP model.
-        
-        Args:
-            text (list or str or torch.Tensor): Text input(s) to embed
-            
-        Returns:
-            tuple: (text_features, tokenized_text)
-                - text_features: Normalized text embeddings
-                - tokenized_text: Tokenized text inputs
-        """
-        # Handle different input types
-        if not isinstance(text, torch.Tensor):
-            text_embeddings = self.tokenizer(text if isinstance(text, list) else [text]).to(self.device)
-        else:
-            text_embeddings = text.to(self.device)
-
-        # Extract features with mixed precision
-        with torch.no_grad(), torch.cuda.amp.autocast():
-            text_features = self.model.encode_text(text_embeddings)
-            
-        return text_features, text_embeddings.detach().cpu()
-    
-    def embed_image(self, img):
-        """
-        Extract image embeddings using the CLIP model.
-        
-        Args:
-            img (list or PIL.Image or torch.Tensor): Image input(s) to embed
-            
-        Returns:
-            tuple: (image_features, preprocessed_images)
-                - image_features: Normalized image embeddings
-                - preprocessed_images: Preprocessed image tensors
-        """
-        # Handle different input types
-        if isinstance(img, list):
-            if not isinstance(img[0], torch.Tensor):
-                img = [self.preprocessor(i).to(self.device) for i in img]
-            img = torch.stack(img, dim=0).to(self.device)
-        else:
-            if not isinstance(img, torch.Tensor):
-                img = self.preprocessor(img)
-            
-        if img.ndim == 3:
-            img = img.unsqueeze(0)
-        
-        try:
-            img = img.to(self.device)
-        except Exception as e:
-            pass
-
-        # Extract features with mixed precision
-        with torch.no_grad(), torch.cuda.amp.autocast():
-            image_features = self.model.encode_image(img)
-            
-        return image_features, img.detach().cpu()
-    
-
-def load_data(dataset, preprocess, train=False):
-    """
-    Load a dataset by name with appropriate preprocessing.
-    
-    Args:
-        dataset (str): Name of the dataset to load
-        preprocess (callable): Image preprocessing function
-        train (bool): Whether to load training split (True) or validation/test split (False)
-        
-    Returns:
-        IterableDataset: The loaded dataset
-        
-    Raises:
-        ValueError: If the dataset is not supported
-    """
-    if dataset == "imagenet":
-        dataset = ImageNetDataset(preprocess, "train" if train else "validation")
-    elif dataset == "cc3m":
-        dataset = CC3MDataset(preprocess, "train" if train else "validation")
-    elif dataset == "celeba":
-        dataset = CelebAMy(download=True, split="train" if train else "test", 
-                          transform=preprocess, target_type="attr")
+    if model_name.lower() == "resnet50":
+        model = torchvision.models.resnet50(pretrained=True)
+        #model = nn.Sequential(*list(model.children())[:-1])  # Remove classifier
+        embedding_dim = 2048 
+        layer_path="layer4.2.conv3"
+    elif model_name.lower() == "convnext_tiny":
+        model = torchvision.models.convnext_tiny(pretrained=True)
+        #model = nn.Sequential(*list(model.features), nn.AdaptiveAvgPool2d(1))
+        embedding_dim = 768
+    elif model_name.lower() == "vit_b_16":
+        model = torchvision.models.vit_b_16(pretrained=True)
+        #model.heads = nn.Identity()
+        embedding_dim = 768
+        layer_path = "encoder.layers.encoder_layer_11.mlp.3"
+    elif model_name.lower() == "dinov2_vitl14":
+        import torch.hub
+        model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14')
+        embedding_dim =1024
+        layer_path="blocks.23.mlp.fc2"
     else:
-        raise ValueError(f"Dataset {dataset} not supported, please use one of {SUPPORTED_DATASETS}")
-
-    # Add reverse class mapping if available
-    if hasattr(dataset, "class_to_idx"):
-        dataset.idx_to_class = {v: k for k, v in dataset.class_to_idx.items()}
+        raise ValueError(f"Unsupported model {model_name}")
     
-    return dataset
+    model.to(device).eval()
+    return model, layer_path, embedding_dim
+
+# -----------------------------
+# Dataset Loaders
+# -----------------------------
+def create_data_loaders(root: str, batch_size: int = 256, num_workers: int = 4, image_size: int = 224):
+    transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(image_size),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                             std=[0.229, 0.224, 0.225])
+    ])
+    dataset = ImageFolder(root=root, transform=transform)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
+                        num_workers=num_workers, pin_memory=True)
+    return loader, len(dataset)
+
+class CelebAWrapper(Dataset):
+    def __init__(self, root, split="train", transform=None):
+        self.dataset = CelebA(root=root, split=split, download=True, transform=transform)
+    
+    def __getitem__(self, idx):
+        img, _ = self.dataset[idx]
+        return img
+    
+    def __len__(self):
+        return len(self.dataset)
+
+# -----------------------------
+# Embedding Extraction
+# -----------------------------
+
+def get_layer_by_path(model, path):
+    """Navigate to a layer using dot notation path."""
+    parts = path.split('.')
+    current = model
+    
+    for part in parts:
+        if part.isdigit():
+            current = current[int(part)]
+        else:
+            current = getattr(current, part)
+    
+    return current
+
+import torch.nn.functional as F
+def extract_embeddings(model, dataloader, device, embedding_dim, save_path, layer_path, args):
+    dataset_size = len(dataloader.dataset)
+    memmap = np.memmap(save_path, dtype=np.float32, mode='w+', shape=(dataset_size, embedding_dim))
+    idx = 0
+    
+    activations = {}
+    def get_activation(name):
+        def hook(model, input, output):
+            activations[name] = output.detach()
+        return hook
+    
+    layer = get_layer_by_path(model, layer_path)
+    model = model.to(device)
+    handle = layer.register_forward_hook(get_activation("layer"))
+    
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Extracting embeddings"):
+            if isinstance(batch, (list, tuple)):
+                imgs = batch[0] if len(batch[0].shape) == 4 else batch
+            else:
+                imgs = batch
+            
+            imgs = imgs.to(device)
+            model(imgs)
+            features = activations["layer"]
+            if args.model.startswith("vit") or args.model.startswith("dinov2"):
+                features = features[:, 0, :]
+            elif args.model.startswith("resnet"):
+                features = features.sum(dim=(2,3))
+            if isinstance(features, torch.Tensor):
+                features = features.squeeze()
+                if features.ndim == 1:
+                    features = features.unsqueeze(0)
+            
+            #if args.model.startswith("dinov2"):
+            #    features = F.normalize(features, p=2, dim=1)  # L2 normalization
+
+            memmap[idx:idx + features.shape[0]] = features.detach().cpu().numpy()
+            idx += features.shape[0]
+    
+    memmap.flush()
+    logger.info(f"Saved embeddings to {save_path}")
+    return save_path
 
 
-def load_vocab(vocab, vocab_size=-1):
+def extract_embeddings_and_labels(model, dataloader, device, embedding_dim, save_path, 
+                                  label_save_path, layer_path, args, dataset=None):
     """
-    Load a text vocabulary from files.
+    Extract embeddings and save corresponding labels.
     
     Args:
-        vocab (str): Name of the vocabulary to load
-        vocab_size (int): Maximum number of items to include (-1 for all)
-        
-    Returns:
-        VocabDataset: Dataset containing the vocabulary items
-        
-    Raises:
-        ValueError: If the vocabulary is not supported
+        model: The neural network model
+        dataloader: DataLoader for the dataset
+        device: Device to run on
+        embedding_dim: Dimension of embeddings
+        save_path: Path to save embeddings (.npy)
+        label_save_path: Path to save labels (.txt)
+        layer_path: Path to the layer for hook
+        args: Command line arguments
+        dataset: Original dataset object (for ImageFolder class names)
     """
-    if vocab not in SUPPORTED_VOCABS.keys():
-        raise ValueError(f"Vocab {vocab} not supported, please use one of {SUPPORTED_VOCABS.keys()}")
+    dataset_size = len(dataloader.dataset)
+    memmap = np.memmap(save_path, dtype=np.float32, mode='w+', shape=(dataset_size, embedding_dim))
+    idx = 0
     
-    path = SUPPORTED_VOCABS[vocab]
+    # List to store labels
+    all_labels = []
     
-    # Handle composite vocabularies (e.g., "laion" = unigrams + bigrams)
-    if isinstance(path, list):
-        current_vocab = None
-        for x in path:
-            if current_vocab is None:
-                current_vocab = load_vocab(x, vocab_size // 2 if vocab_size > 0 else -1)
+    activations = {}
+    def get_activation(name):
+        def hook(model, input, output):
+            activations[name] = output.detach()
+        return hook
+    
+    layer = get_layer_by_path(model, layer_path)
+    model = model.to(device)
+    handle = layer.register_forward_hook(get_activation("layer"))
+    
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Extracting embeddings and labels"):
+            # Handle different batch formats
+            if isinstance(batch, (list, tuple)) and len(batch) == 2:
+                imgs, labels = batch
             else:
-                current_vocab += load_vocab(x, vocab_size // 2 if vocab_size > 0 else -1)
-        return current_vocab
-
-    # Load vocabulary from file
-    vocab_data = []
-    with open(path, 'r') as f:
-        lines = f.readlines()
-        if vocab_size > 0:
-            # Apply vocabulary size limit if specified
-            if vocab_size > len(lines):
-                warnings.warn(f"Vocab size {vocab_size} is greater than the actual vocab size {len(lines)}. Using full vocab.")
-            else:
-                lines = lines[-vocab_size:]  # Take most frequent terms (assuming frequency-sorted lists)
-
-        for line in lines:
-            line = line.strip()
-            vocab_data.append(line)
+                imgs = batch
+                labels = None
+            
+            imgs = imgs.to(device)
+            model(imgs)
+            features = activations["layer"]
+            
+            # Process features based on model type
+            if args.model.startswith("vit") or args.model.startswith("dinov2"):
+                features = features[:, 0, :]
+            elif args.model.startswith("resnet"):
+                features = features.sum(dim=(2, 3))
+            
+            if isinstance(features, torch.Tensor):
+                features = features.squeeze()
+                if features.ndim == 1:
+                    features = features.unsqueeze(0)
+            
+            # Save embeddings
+            memmap[idx:idx + features.shape[0]] = features.detach().cpu().numpy()
+            
+            # Process and save labels
+            if labels is not None:
+                if args.dataset.lower() == "imagenet":
+                    # For ImageNet, labels are class indices
+                    # Convert to class names if available
+                    if hasattr(dataset, 'classes'):
+                        label_names = [dataset.classes[label.item()] for label in labels]
+                    else:
+                        label_names = [str(label.item()) for label in labels]
+                    all_labels.extend(label_names)
+                
+                elif args.dataset.lower() == "celeba":
+                    # For CelebA, handle different target types
+                    if args.celeba_target_type == "identity":
+                        # Identity labels are single integers
+                        label_names = [str(label.item()) for label in labels]
+                    else:  # attributes
+                        # Attributes are binary vectors
+                        # You can either save all attributes or select specific ones
+                        if args.celeba_attr_idx is not None:
+                            # Use specific attribute
+                            label_names = [str(label[args.celeba_attr_idx].item()) for label in labels]
+                        else:
+                            # Convert all attributes to string (space-separated)
+                            label_names = [' '.join(map(str, label.tolist())) for label in labels]
+                    all_labels.extend(label_names)
+            
+            idx += features.shape[0]
     
-    return VocabDataset(vocab_data)
-
-
-def safe_collate(batch):
-    # Filter out None values
-    batch = [(img, txt) for img, txt in batch if img is not None or txt is not None]
-    if not batch:
-        return None, None  # Handle empty batch case
+    handle.remove()
+    memmap.flush()
+    logger.info(f"Saved embeddings to {save_path}")
     
-    # If any item is None, set it to None
-    images, texts = zip(*batch)
-    if any(x is None for x in images):
-        images = None
+    # Save labels to text file
+    if all_labels:
+        with open(label_save_path, 'w') as f:
+            for label in all_labels:
+                f.write(f"{label}\n")
+        logger.info(f"Saved {len(all_labels)} labels to {label_save_path}")
     else:
-        images = torch.stack(images)
-        
-    if any(x is None for x in texts):
-        texts = None
-        
-    # Process valid items
-    return images, texts
+        logger.warning("No labels were extracted!")
+    
+    return save_path, label_save_path
 
-
+# -----------------------------
+# Main
+# -----------------------------
 def main(args):
-    """
-    Main function for extracting and saving embeddings.
-    
-    Loads the specified dataset and model, extracts embeddings for all samples,
-    and saves them to disk as memory-mapped arrays.
-    
-    Args:
-        args (argparse.Namespace): Command line arguments
-    """
-    set_seed(42)
-    logger.info(f"Extracting embeddings for {args.dataset} using {args.model} model")
-    device = get_device()
+    device = "cuda" #if torch.cuda.is_available() else "cpu"
     logger.info(f"Using device: {device}")
     
-    # Load CLIP model and embedding extractor
-    extractor = EmbeddingExtractor(args.model, device)
+    model, layer_path, embedding_dim = get_model(args.model, device)
     
-    # Load appropriate dataset
-    if args.dataset in SUPPORTED_DATASETS:
-        logger.info(f"Loading dataset {args.dataset}")
-        dataset = load_data(args.dataset, extractor.preprocessor, args.train_split)
-        split_name = "train" if args.train_split else "validation"
-    elif args.dataset in SUPPORTED_VOCABS.keys():
-        logger.info(f"Loading vocab {args.dataset}")
-        dataset = load_vocab(args.dataset, args.vocab_size)
-        split_name = str(args.vocab_size)
+    if args.dataset.lower() == "imagenet":
+        loader, dataset_size = create_data_loaders(args.data_path, batch_size=args.batch_size, num_workers=args.workers)
     else:
-        raise ValueError(f"Dataset {args.dataset} not supported, please use one of {SUPPORTED_DATASETS + list(SUPPORTED_VOCABS.keys())}")
+        raise ValueError(f"Unsupported dataset {args.dataset}")
     
-    with torch.no_grad(), torch.cuda.amp.autocast():
-        # Get a sample to determine embedding dimension
-        dataset_size = len(dataset)
-        sample = dataset[0][0]
-        if sample is None:
-            sample = dataset[0][1]
-            if sample is None:
-                logger.error("Sample is None, skipping embedding extraction.")
-                return
-            features, _ = extractor.embed_text(sample)
-        else:
-            features, _ = extractor.embed_image(sample)
-        embedding_dim = features.shape[-1]
-        
-        logger.info(f"Creating embeddings Memmap with length {dataset_size} and shape {embedding_dim}")
-        
-        # Prepare memory-mapped arrays for storing embeddings
-        memmap_image_path = os.path.join(
-            "data", 
-            f"{args.dataset}_{args.model}_{split_name}_image_{dataset_size}_{embedding_dim}.npy"
-        )
-        image_memmap = np.memmap(
-            memmap_image_path, 
-            dtype=np.float32, 
-            mode='w+', 
-            shape=(dataset_size, embedding_dim)
-        )
-        logger.info(f"Saving image embeddings to {memmap_image_path}")
-        
-        memmap_text_path = os.path.join(
-            "data", 
-            f"{args.dataset}_{args.model}_{split_name}_text_{dataset_size}_{embedding_dim}.npy"
-        )
-        text_memmap = np.memmap(
-            memmap_text_path, 
-            dtype=np.float32, 
-            mode='w+', 
-            shape=(dataset_size, embedding_dim)
-        )
-        logger.info(f"Saving text embeddings to {memmap_text_path}")
-        
-        # Also save the original text for reference
-        text_output_path = os.path.join(
-            "data", 
-            f"{args.dataset}_{args.model}_{split_name}_text_{dataset_size}.txt"
-        )
-        logger.info(f"Saving original text to {text_output_path}")
-        
-        # Process data in batches
-        text_full = []
-        dl = torch.utils.data.DataLoader(
-            dataset, 
-            batch_size=args.batch_size, 
-            num_workers=args.workers,
-            pin_memory=True, 
-            drop_last=False,
-            collate_fn=safe_collate
-        )
-        
-        logger.info("Extracting embeddings...")
-        start_idx = 0
-        successful_count = 0
-        for images, texts in tqdm(dl, total=len(dl), desc="Extracting embeddings"):
-            if images is None and texts is None:
-                continue
-            
-            # Calculate batch indices
-            end_idx = start_idx + len(images if images is not None else texts)
-            
-            # Extract and save image embeddings
-            if images is not None:
-                image_embeddings, _ = extractor.embed_image(images)
-                image_memmap[start_idx:end_idx] = image_embeddings.detach().cpu().numpy().astype(np.float32)
-                image_memmap.flush()
-            
-            # Extract and save text embeddings
-            if texts is not None:
-                
-                # Convert numerical class indices to text labels if needed
-                texts = list(texts)
-                if isinstance(texts, list) and isinstance(texts[0], int):
-                    texts = [dataset.idx_to_class[x] for x in texts]
-                
-                text_embeddings, _ = extractor.embed_text(texts)
-                text_memmap[start_idx:end_idx] = text_embeddings.detach().cpu().numpy().astype(np.float32)
-                text_memmap.flush()
-            
-                # Collect original text
-                text_full.extend(texts)
-            
-            # Update indices for next batch
-            start_idx = end_idx
-            successful_count += len(images if images is not None else texts)
-        
-        # Save original text to file
-        with open(text_output_path, 'w') as f:
-            f.write("\n".join(text_full))
-        
-        #Correct end index for memmap if needed
-        if successful_count < dataset_size:
-            logger.info(f"Resizing memmaps to {successful_count} items")
-            
-            # Create new memmaps with correct size
-            final_image_path = os.path.join(
-                "data", 
-                f"{args.dataset}_{args.model}_{split_name}_image_{successful_count}_{embedding_dim}.npy"
-            )
-            final_text_path = os.path.join(
-                "data", 
-                f"{args.dataset}_{args.model}_{split_name}_text_{successful_count}_{embedding_dim}.npy"
-            )
-            
-            # Copy data to new memmaps
-            final_image_memmap = np.memmap(
-                final_image_path, 
-                dtype=np.float32, 
-                mode='w+', 
-                shape=(successful_count, embedding_dim)
-            )
-            final_image_memmap[:] = image_memmap[:successful_count]
-            final_image_memmap.flush()
-            
-            final_text_memmap = np.memmap(
-                final_text_path, 
-                dtype=np.float32, 
-                mode='w+', 
-                shape=(successful_count, embedding_dim)
-            )
-            final_text_memmap[:] = text_memmap[:successful_count]
-            final_text_memmap.flush()
-            
-            # Also update the text file
-            final_text_output_path = os.path.join(
-                "data", 
-                f"{args.dataset}_{args.model}_{split_name}_text_{successful_count}.txt"
-            )
-            with open(final_text_output_path, 'w') as f:
-                f.write("\n".join(text_full))
-            
-            logger.info(f"Resized memmaps saved at {final_image_path} and {final_text_path} and text to {final_text_output_path}")
-                        
-            # Cleanup original files
-            os.remove(memmap_image_path)
-            os.remove(memmap_text_path)
-            os.remove(text_output_path)
-            logger.info(f"Removed original memmaps and text file from {memmap_image_path}, {memmap_text_path}, and {text_output_path}")
-            
-            memmap_image_path = final_image_path
-            image_memmap = final_image_memmap
-            memmap_text_path = final_text_path
-            text_memmap = final_text_memmap
-            
-        if image_memmap.sum() == 0:
-            os.remove(memmap_image_path)
-            logger.info(f"Removed empty memmap file {memmap_image_path}")
-        
-        if text_memmap.sum() == 0:
-            os.remove(memmap_text_path)
-            logger.info(f"Removed empty memmap file {memmap_text_path}")
-        
-        logger.info("Embedding extraction complete")
-        
-        
+    os.makedirs(args.save_dir, exist_ok=True)
+    save_path = os.path.join(args.save_dir, f"sae/{args.dataset}_{args.model}_embeddings_{args.split}.npy")
+    labels_save_path = os.path.join(args.save_dir, f"sae/{args.dataset}_{args.model}_labels_{args.split}.npy")
+    
+    
+    extract_embeddings(model, loader, device, embedding_dim, save_path, layer_path=layer_path, args=args)
+    #extract_embeddings_and_labels(model=model, dataloader=loader, device=device, embedding_dim=embedding_dim, save_path=save_path, label_save_path=labels_save_path, layer_path=layer_path, args=args, dataset="imagenet")
+
+# -----------------------------
+# Argparse
+# -----------------------------
 if __name__ == "__main__":
-    args = parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", type=str, required=True, help="Dataset name: imagenet, celeba")
+    parser.add_argument("--data-path", type=str, required=True, help="Path to dataset root")
+    parser.add_argument("--model", type=str, required=True, help="Model: resnet50, convnext_tiny, vit_b_16, dinov2_vitb14")
+    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--save-dir", type=str, default="data")
+    parser.add_argument("--split", type=str, default="train", help="Dataset split for CelebA")
+    args = parser.parse_args()
+    
     main(args)

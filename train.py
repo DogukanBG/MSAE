@@ -4,20 +4,23 @@ import argparse
 import logging
 from tqdm import tqdm
 from dataclasses import asdict
+import wandb
+import os
 
 from metrics import calculate_similarity_metrics, identify_dead_neurons, orthogonal_decoder, cknna, explained_variance
 from utils import SAEDataset, set_seed, get_device, geometric_median, calculate_vector_mean, LinearDecayLR, CosineWarmupScheduler
 from config import get_config
 from sae import Autoencoder, MatryoshkaAutoencoder
 from loss import SAELoss
+import utils as ut 
 
 """
-Sparse Autoencoder (SAE) Training Script
+Sparse Autoencoder (SAE) Training Script with WandB Integration
 
 This script provides a complete pipeline for training various types of sparse autoencoder models,
 including standard SAEs with different activation functions and Matryoshka SAEs with nested
 feature hierarchies. It handles training, evaluation, and model saving with configurable
-hyperparameters.
+hyperparameters, and comprehensive Weights & Biases logging.
 """
 
 logging.basicConfig(
@@ -60,11 +63,65 @@ def parse_args() -> argparse.Namespace:
                        help="Number of training epochs")
     parser.add_argument("-ef", "--expansion_factor", type=float, default=1.0, 
                        help="Ratio of latent dimensions to input dimensions")
+    parser.add_argument("--eval_hc", default=False, type=bool)
+    parser.add_argument("--eval_only", default=False, type=bool)
+    parser.add_argument("-bs", "--batch_size", type=int, default=8192, 
+                       help="Number of training epochs")
+    parser.add_argument("--wandb_project", type=str, default="Sparse Autoencoders",
+                       help="WandB project name")
+    parser.add_argument("--wandb_entity", type=str, default=None,
+                       help="WandB entity (username or team)")
+    parser.add_argument("--wandb_mode", type=str, default="online",
+                       choices=["online", "offline", "disabled"],
+                       help="WandB logging mode")
+    parser.add_argument("--wandb_tags", type=str, nargs="+", default=[],
+                       help="Additional tags for WandB run")
     
     return parser.parse_args()
 
+def get_layer_by_path(model, path):
+    """Navigate to a layer using dot notation path."""
+    parts = path.split('.')
+    current = model
+    
+    for part in parts:
+        if part.isdigit():
+            current = current[int(part)]
+        else:
+            current = getattr(current, part)
+    
+    return current
 
-def eval(model, eval_loader, loss_fn, device, cfg):
+def extract_model_type(dataset_path: str) -> str:
+    """Extract model type from dataset path."""
+    if "resnet50" in dataset_path.lower():
+        return "ResNet50"
+    elif "vit_b_16" in dataset_path.lower():
+        return "ViT-B/16"
+    elif "dinov2_vitl14" in dataset_path.lower():
+        return "DINOv2-ViT-L/14"
+    elif "convnext" in dataset_path.lower():
+        return "ConvNeXt"
+    else:
+        return "Unknown"
+
+def create_wandb_run_name(cfg, args, model_type: str) -> str:
+    """Create a descriptive and unique run name for WandB."""
+    activation = args.activation
+    if args.model == "ReLUSAE" and "_" in args.activation:
+        activation_base, sparse_weight = args.activation.split("_")
+        activation = f"{activation_base}_L1-0.{sparse_weight}"
+    
+    if cfg.model.use_matryoshka:
+        matryoshka_type = "RW" if "RW" in args.model else "UW"
+        run_name = f"{model_type}_{args.model}_{matryoshka_type}_{activation}_EF{args.expansion_factor}"
+    else:
+        run_name = f"{model_type}_{args.model}_{activation}_EF{args.expansion_factor}"
+    
+    return run_name
+
+def eval(model, eval_loader, loss_fn, device, cfg, prefix="val"):
+    """Evaluation function that returns metrics dict for WandB logging."""
     # Evaluation phase
     loss_all = 0.0
     recon_loss_all = 0.0
@@ -83,7 +140,7 @@ def eval(model, eval_loader, loss_fn, device, cfg):
     
     # Switch to evaluation mode
     model.eval()
-    for step, embeddings in enumerate(tqdm(eval_loader, desc="Evaluation")):
+    for step, embeddings in enumerate(tqdm(eval_loader, desc=f"Evaluation ({prefix})")):
         embeddings = embeddings.to(device)
         
         # Forward pass without gradient computation
@@ -121,26 +178,47 @@ def eval(model, eval_loader, loss_fn, device, cfg):
         sparsity_sparse_sum += (repr_sparse == 0.0).float().mean(axis=-1).mean()
         sparsity_all_sum += (repr_all == 0.0).float().mean(axis=-1).mean()
     
-    # Log evaluation metrics (averaged over batches)
-    logger.info("Evaluation results:")
-    logger.info(f"  Loss: {loss_all / len(eval_loader):.6f}")
-    logger.info(f"  Reconstruction Loss: {recon_loss_all / len(eval_loader):.6f}")
-    logger.info(f"  Sparsity Loss: {sparse_loss_all / len(eval_loader):.6f}")
-    logger.info(f"  FVU Sparse: {fvu_score_sparse_sum / len(eval_loader):.4f}")
-    logger.info(f"  FVU All: {fvu_score_all_sum / len(eval_loader):.4f}")
-    logger.info(f"  CKNNA Sparse: {cknna_score_sparse_sum / len(eval_loader):.4f}")
-    logger.info(f"  CKNNA All: {cknna_score_all_sum / len(eval_loader):.4f}")
-    logger.info(f"  Cosine Similarity Sparse: {diagonal_cs_sparse_sum / len(eval_loader):.4f}")
-    logger.info(f"  MAE Distance Sparse: {mae_distance_sparse_sum / len(eval_loader):.4f}")
-    logger.info(f"  Cosine Similarity All: {diagonal_cs_all_sum / len(eval_loader):.4f}")
-    logger.info(f"  MAE Distance All: {mae_distance_all_sum / len(eval_loader):.4f}")
-    logger.info(f"  Sparsity Sparse: {sparsity_sparse_sum / len(eval_loader):.4f}")
-    logger.info(f"  Sparsity All: {sparsity_all_sum / len(eval_loader):.4f}")
-    logger.info(f"  Orthogonal Decoder Loss: {od_sum / len(eval_loader):.6f}")
+    # Calculate averages
+    num_batches = len(eval_loader)
+    metrics = {
+        f"{prefix}/loss": loss_all / num_batches,
+        f"{prefix}/reconstruction_loss": recon_loss_all / num_batches,
+        f"{prefix}/sparsity_loss": sparse_loss_all / num_batches,
+        f"{prefix}/fvu_sparse": fvu_score_sparse_sum / num_batches,
+        f"{prefix}/fvu_all": fvu_score_all_sum / num_batches,
+        f"{prefix}/cknna_sparse": cknna_score_sparse_sum / num_batches,
+        f"{prefix}/cknna_all": cknna_score_all_sum / num_batches,
+        f"{prefix}/cosine_sim_sparse": diagonal_cs_sparse_sum / num_batches,
+        f"{prefix}/mae_sparse": mae_distance_sparse_sum / num_batches,
+        f"{prefix}/cosine_sim_all": diagonal_cs_all_sum / num_batches,
+        f"{prefix}/mae_all": mae_distance_all_sum / num_batches,
+        f"{prefix}/sparsity_sparse": sparsity_sparse_sum / num_batches,
+        f"{prefix}/sparsity_all": sparsity_all_sum / num_batches,
+        f"{prefix}/orthogonal_decoder": od_sum / num_batches,
+    }
+    
+    # Log evaluation metrics
+    logger.info(f"Evaluation results ({prefix}):")
+    logger.info(f"  Loss: {metrics[f'{prefix}/loss']:.6f}")
+    logger.info(f"  Reconstruction Loss: {metrics[f'{prefix}/reconstruction_loss']:.6f}")
+    logger.info(f"  Sparsity Loss: {metrics[f'{prefix}/sparsity_loss']:.6f}")
+    logger.info(f"  FVU Sparse: {metrics[f'{prefix}/fvu_sparse']:.4f}")
+    logger.info(f"  FVU All: {metrics[f'{prefix}/fvu_all']:.4f}")
+    logger.info(f"  CKNNA Sparse: {metrics[f'{prefix}/cknna_sparse']:.4f}")
+    logger.info(f"  CKNNA All: {metrics[f'{prefix}/cknna_all']:.4f}")
+    logger.info(f"  Cosine Similarity Sparse: {metrics[f'{prefix}/cosine_sim_sparse']:.4f}")
+    logger.info(f"  MAE Distance Sparse: {metrics[f'{prefix}/mae_sparse']:.4f}")
+    logger.info(f"  Cosine Similarity All: {metrics[f'{prefix}/cosine_sim_all']:.4f}")
+    logger.info(f"  MAE Distance All: {metrics[f'{prefix}/mae_all']:.4f}")
+    logger.info(f"  Sparsity Sparse: {metrics[f'{prefix}/sparsity_sparse']:.4f}")
+    logger.info(f"  Sparsity All: {metrics[f'{prefix}/sparsity_all']:.4f}")
+    logger.info(f"  Orthogonal Decoder Loss: {metrics[f'{prefix}/orthogonal_decoder']:.6f}")
+    
+    return metrics
 
 def main(args):
     """
-    Main training function for Sparse Autoencoders.
+    Main training function for Sparse Autoencoders with WandB integration.
     
     This function handles the complete training pipeline:
     1. Setting up configuration based on model type and arguments
@@ -150,6 +228,7 @@ def main(args):
     5. Executing the training loop with periodic evaluation
     6. Tracking metrics including reconstruction quality, sparsity, and dead neurons
     7. Saving the trained model with relevant metadata
+    8. Logging all metrics and artifacts to Weights & Biases
     
     Args:
         args (argparse.Namespace): Command line arguments from parse_args()
@@ -160,32 +239,53 @@ def main(args):
     # Get configuration based on model type
     cfg = get_config(args.model)
     cfg.training.epochs = args.epochs
+    cfg.training.batch_size = args.batch_size
+    ##cfg.training.mean_center=True#cfg.training.mean_center, 
+    ##cfg.training.target_norm=None#cfg.training.target_norm,
     
     # Set the random seed for reproducibility
-    set_seed(cfg.training.seed)
+    set_seed(79677) #V1: 68779 V2: 79677
     
     # Set the device (GPU/CPU)
     device = get_device()
     logger.info(f"Using device: {device}")
+    
+    # Extract model type from dataset path
+    model_type_str = None
+    if "resnet50" in args.dataset_train:
+        model_type_str = "resnet50"
+    elif "vit_b_16" in args.dataset_train:
+        model_type_str = "vit_b_16"
+    elif "dinov2_vitl14" in args.dataset_train:
+        model_type_str = "dinov2_vitl14"
+    
+    model_type_display = extract_model_type(args.dataset_train)
     
     # Load datasets
     train_ds = SAEDataset(
         args.dataset_train, 
         dtype=cfg.training.dtype, 
         mean_center=cfg.training.mean_center, 
-        target_norm=cfg.training.target_norm
+        target_norm=cfg.training.target_norm,
+        split="train",
+        model_type=model_type_str
     )
     eval_ds = SAEDataset(
         args.dataset_test, 
         dtype=cfg.training.dtype, 
-        mean_center=cfg.training.mean_center, 
-        target_norm=cfg.training.target_norm
+        mean_center=cfg.training.mean_center,
+        target_norm=cfg.training.target_norm,
+        split="val",
+        model_type=model_type_str
     )
     logger.info(f"Training dataset length: {len(train_ds)}, Evaluation dataset length: {len(eval_ds)}, Embedding size: {train_ds.vector_size}")
     logger.info(f"Training dataset mean center: {train_ds.mean.mean()}, Scaling factor: {train_ds.scaling_factor} with target norm {train_ds.target_norm}")
     logger.info(f"Evaluation dataset mean center: {eval_ds.mean.mean()}, Scaling factor: {eval_ds.scaling_factor} with target norm {eval_ds.target_norm}")
     assert train_ds.vector_size == eval_ds.vector_size, "Training and evaluation datasets must have the same embedding size"
+    
+    has_second_modality = False
     if args.dataset_second_modality is not None:
+        has_second_modality = True
         eval_ds_second = SAEDataset(
             args.dataset_second_modality,
             dtype=cfg.training.dtype,
@@ -246,6 +346,90 @@ def main(args):
     else:
         logger.info(f"Using standard SAE with {cfg.model.activation} activation")
     
+    # Initialize Weights & Biases
+    wandb_run_name = create_wandb_run_name(cfg, args, model_type_display)
+    
+    # Prepare WandB config
+    wandb_config = {
+        # Model architecture
+        "model_type": args.model,
+        "backbone": model_type_display,
+        "activation": cfg.model.activation,
+        "expansion_factor": args.expansion_factor,
+        "n_inputs": cfg.model.n_inputs,
+        "n_latents": cfg.model.n_latents,
+        "use_matryoshka": cfg.model.use_matryoshka,
+        "tied_weights": cfg.model.tied,
+        "normalize_decoder": cfg.model.normalize,
+        "latent_soft_cap": cfg.model.latent_soft_cap,
+        
+        # Training hyperparameters
+        "epochs": cfg.training.epochs,
+        "batch_size": cfg.training.batch_size,
+        "learning_rate": cfg.training.lr,
+        "weight_decay": cfg.training.weight_decay,
+        "beta1": cfg.training.beta1,
+        "beta2": cfg.training.beta2,
+        "eps": cfg.training.eps,
+        "scheduler": cfg.training.scheduler,
+        "clip_grad": cfg.training.clip_grad,
+        
+        # Loss configuration
+        "reconstruction_loss": cfg.loss.reconstruction_loss,
+        "sparse_loss": cfg.loss.sparse_loss,
+        "sparse_weight": cfg.loss.sparse_weight,
+        
+        # Data preprocessing
+        "mean_center": cfg.training.mean_center,
+        "target_norm": cfg.training.target_norm,
+        "bias_init_median": cfg.training.bias_init_median,
+        
+        # Dataset info
+        "train_dataset": os.path.basename(args.dataset_train),
+        "eval_dataset": os.path.basename(args.dataset_test),
+        "train_size": len(train_ds),
+        "eval_size": len(eval_ds),
+        "has_second_modality": has_second_modality,
+        
+        # Device
+        "device": str(device),
+        "seed": 68779,
+    }
+    
+    # Add Matryoshka-specific config
+    if cfg.model.use_matryoshka:
+        wandb_config.update({
+            "nesting_list": cfg.model.nesting_list,
+            "relative_importance": cfg.model.relative_importance,
+            "matryoshka_type": "RW" if "RW" in args.model else "UW",
+        })
+    
+    # Prepare tags
+    tags = [
+        args.model,
+        model_type_display,
+        cfg.model.activation,
+        f"EF{args.expansion_factor}",
+    ]
+    if cfg.model.use_matryoshka:
+        tags.append("Matryoshka")
+        tags.append("RW" if "RW" in args.model else "UW")
+    tags.extend(args.wandb_tags)
+    
+    # Initialize WandB run
+    wandb.init(
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        name=wandb_run_name,
+        config=wandb_config,
+        tags=tags,
+        group=model_type_display,  # Group by backbone model
+        mode=args.wandb_mode,
+    )
+    
+    logger.info(f"WandB run initialized: {wandb.run.name} (ID: {wandb.run.id})")
+    logger.info(f"WandB URL: {wandb.run.url}")
+    
     # Calculate bias initialization (median or zero)
     logger.info(f"Calculating bias initialization with median: {cfg.training.bias_init_median}")
     bias_init = 0.0
@@ -254,12 +438,27 @@ def main(args):
         bias_init = geometric_median(train_ds, device=device, max_number=len(train_ds)//10)
     logger.info(f"Bias initialization: {bias_init}")
     
+    # Log bias initialization to WandB
+    wandb.log({"initialization/bias_init_norm": torch.norm(bias_init).item() if isinstance(bias_init, torch.Tensor) else abs(bias_init)})
+    
     # Initialize the appropriate model type
     if cfg.model.use_matryoshka:
         model = MatryoshkaAutoencoder(bias_init=bias_init, **asdict(cfg.model))
     else:
         model = Autoencoder(bias_init=bias_init, **asdict(cfg.model))
     model = model.to(device)
+    
+    # Log model architecture
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"Total parameters: {total_params:,}")
+    logger.info(f"Trainable parameters: {trainable_params:,}")
+    
+    wandb.log({
+        "model/total_params": total_params,
+        "model/trainable_params": trainable_params,
+        "model/total_params_millions": total_params / 1e6,
+    })
     
     # Prepare loss function
     # Use zeros or calculate mean from dataset depending on config
@@ -286,6 +485,8 @@ def main(args):
         weight_decay=cfg.training.weight_decay, 
         fused=use_fused
     )
+    
+    logger.info(f"Using fused AdamW: {use_fused}")
     
     # Prepare the learning rate scheduler
     if cfg.training.scheduler == 1:
@@ -317,7 +518,7 @@ def main(args):
         num_workers=cfg.training.num_workers, 
         shuffle=False
     )
-    if args.dataset_second_modality is not None:
+    if has_second_modality:
         eval_loader_second = torch.utils.data.DataLoader(
             eval_ds_second,
             batch_size=cfg.training.batch_size,
@@ -329,15 +530,23 @@ def main(args):
     global_step = 0
     numb_of_dead_neurons = 0
     dead_neurons = []
+    best_val_fvu = float('inf')  # Track best validation FVU for model saving
     
     for epoch in range(cfg.training.epochs):
         model.train()
         logger.info(f"Epoch {epoch+1}/{cfg.training.epochs}")
         
+        # Epoch metrics accumulators
+        epoch_loss_sum = 0.0
+        epoch_recon_loss_sum = 0.0
+        epoch_sparse_loss_sum = 0.0
+        epoch_steps = 0
+        
         # Training loop for current epoch
         for step, embeddings in enumerate(tqdm(train_loader, desc="Training")):
             optimizer.zero_grad()
             global_step += 1
+            epoch_steps += 1
             embeddings = embeddings.to(device)
             
             # Forward pass through model
@@ -365,6 +574,11 @@ def main(args):
                 # Standard SAE loss computation
                 loss, recon_loss, sparse_loss = loss_fn(recons_sparse, embeddings, repr_sparse)
             
+            # Accumulate epoch metrics
+            epoch_loss_sum += loss.item()
+            epoch_recon_loss_sum += recon_loss.item()
+            epoch_sparse_loss_sum += sparse_loss.item()
+            
             # Backpropagation
             loss.backward()
             
@@ -373,47 +587,81 @@ def main(args):
             model.project_grads_decode()
             
             # Gradient clipping for stability
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.clip_grad)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.clip_grad)
             
             # Update model parameters
             optimizer.step()
             
-            # Detach tensors for metric calculation
-            recons_sparse, recons_all, embeddings = recons_sparse.detach(), recons_all.detach(), embeddings.detach()
-            
-            # Calculate evaluation metrics
-            # CKNNA (Centered Kernel Nearest Neighbor Alignment) scores
-            cknna_score_sparse = cknna(recons_sparse, embeddings)
-            cknna_score_all = cknna(recons_all, embeddings)
-            
-            # FVU (Explained Variance) metric
-            fvu_score_sparse = explained_variance(embeddings, recons_sparse)
-            fvu_score_all = explained_variance(embeddings, recons_all)
-            
-            # Reconstruction quality metrics
-            diagonal_cs_sparse, mae_distance_sparse = calculate_similarity_metrics(recons_sparse, embeddings)
-            diagonal_cs_all, mae_distance_all = calculate_similarity_metrics(recons_all, embeddings)
-            
-            # Orthogonality of decoder features
-            od = orthogonal_decoder(model.decoder)
-            
-            # Sparsity measurements
-            sparsity_sparse = (repr_sparse == 0.0).float().mean(axis=-1).mean()
-            sparsity_all = (repr_all == 0.0).float().mean(axis=-1).mean()
-
-            # Representation Metrics
-            repr_norm = repr_all.norm(dim=-1).mean().item()
-            repr_max = repr_all.max(dim=-1).values.mean().item()
-
-            # Check for dead neurons periodically
-            if global_step % cfg.training.check_dead == 0:
-                activations = model.get_and_reset_stats()
-                dead_neurons = identify_dead_neurons(activations).numpy().tolist()
-                numb_of_dead_neurons = len(dead_neurons)
-                logger.info(f"Number of dead neurons: {numb_of_dead_neurons}")
-            
             # Log metrics periodically
-            if global_step % cfg.training.print_freq == 0:
+            if global_step % 100 == 0:
+                
+                # Detach tensors for metric calculation
+                recons_sparse, recons_all, embeddings = recons_sparse.detach(), recons_all.detach(), embeddings.detach()
+                
+                # Calculate evaluation metrics
+                # CKNNA (Centered Kernel Nearest Neighbor Alignment) scores
+                cknna_score_sparse = cknna(recons_sparse, embeddings)
+                cknna_score_all = cknna(recons_all, embeddings)
+                
+                # FVU (Explained Variance) metric
+                fvu_score_sparse = explained_variance(embeddings, recons_sparse)
+                fvu_score_all = explained_variance(embeddings, recons_all)
+                
+                # Reconstruction quality metrics
+                diagonal_cs_sparse, mae_distance_sparse = calculate_similarity_metrics(recons_sparse, embeddings)
+                diagonal_cs_all, mae_distance_all = calculate_similarity_metrics(recons_all, embeddings)
+                
+                # Orthogonality of decoder features
+                od = orthogonal_decoder(model.decoder)
+                
+                # Sparsity measurements
+                sparsity_sparse = (repr_sparse == 0.0).float().mean(axis=-1).mean()
+                sparsity_all = (repr_all == 0.0).float().mean(axis=-1).mean()
+
+                # Representation Metrics
+                repr_norm = repr_all.norm(dim=-1).mean().item()
+                repr_max = repr_all.max(dim=-1).values.mean().item()
+
+                # Check for dead neurons periodically
+                if global_step % cfg.training.check_dead == 0:
+                    activations = model.get_and_reset_stats()
+                    dead_neurons = identify_dead_neurons(activations).numpy().tolist()
+                    numb_of_dead_neurons = len(dead_neurons)
+                    logger.info(f"Number of dead neurons: {numb_of_dead_neurons}")
+                    
+                    # Log dead neuron info to WandB
+                    wandb.log({
+                        "train/dead_neurons": numb_of_dead_neurons,
+                        "train/dead_neurons_ratio": numb_of_dead_neurons / cfg.model.n_latents,
+                        "global_step": global_step
+                    })
+                
+                # Get current learning rate
+                current_lr = scheduler.get_last_lr()[0] if scheduler else cfg.training.lr
+                
+                # Log training metrics to WandB
+                wandb.log({
+                    "train/loss": loss.item(),
+                    "train/reconstruction_loss": recon_loss.item(),
+                    "train/sparsity_loss": sparse_loss.item(),
+                    "train/fvu_sparse": fvu_score_sparse,
+                    "train/fvu_all": fvu_score_all,
+                    "train/cknna_sparse": cknna_score_sparse,
+                    "train/cknna_all": cknna_score_all,
+                    "train/cosine_sim_sparse": diagonal_cs_sparse,
+                    "train/mae_sparse": mae_distance_sparse,
+                    "train/cosine_sim_all": diagonal_cs_all,
+                    "train/mae_all": mae_distance_all,
+                    "train/sparsity_sparse": sparsity_sparse.item(),
+                    "train/sparsity_all": sparsity_all.item(),
+                    "train/orthogonal_decoder": od,
+                    "train/repr_norm": repr_norm,
+                    "train/repr_max": repr_max,
+                    "train/grad_norm": grad_norm.item(),
+                    "train/learning_rate": current_lr,
+                    "global_step": global_step
+                })
+                
                 logger.info(f"Epoch: {epoch+1}, Step: {step}, Loss: {loss.item():.6f}, Recon Loss: {recon_loss.item():.6f}, Sparse Loss: {sparse_loss.item():.6f}")
                 logger.info(f"FVU Sparse: {fvu_score_sparse:.4f}, FVU All: {fvu_score_all:.4f}")
                 logger.info(f"CKNNA Sparse: {cknna_score_sparse:.4f}, CKNNA All: {cknna_score_all:.4f}")
@@ -421,6 +669,31 @@ def main(args):
                 logger.info(f"Cosine Similarity All: {diagonal_cs_all:.4f}, MAE Distance All: {mae_distance_all:.4f}")
                 logger.info(f"Sparsity Sparse: {sparsity_sparse:.4f}, Sparsity All: {sparsity_all:.4f}")
                 logger.info(f"Orthogonal Decoder Loss: {od:.6f}, Representation norm {repr_norm:.4f} and max {repr_max:.2f}")
+                
+        # Calculate epoch averages
+        epoch_avg_loss = epoch_loss_sum / epoch_steps
+        epoch_avg_recon = epoch_recon_loss_sum / epoch_steps
+        epoch_avg_sparse = epoch_sparse_loss_sum / epoch_steps
+        
+        # Log epoch averages
+        wandb.log({
+            "epoch/train_loss": epoch_avg_loss,
+            "epoch/train_reconstruction_loss": epoch_avg_recon,
+            "epoch/train_sparsity_loss": epoch_avg_sparse,
+        }, step=epoch+1)
+        
+        # Evaluate the model on the validation set
+        logger.info("Running validation evaluation...")
+        val_metrics = eval(model, eval_loader, loss_fn, device, cfg, prefix="val")
+        wandb.log(val_metrics, step=epoch+1)
+        
+        # Check if this is the best model (lowest validation FVU)
+        current_val_fvu = val_metrics["val/fvu_sparse"]
+        if current_val_fvu < best_val_fvu:
+            best_val_fvu = current_val_fvu
+            logger.info(f"New best validation FVU: {best_val_fvu:.4f}")
+            wandb.run.summary["best_val_fvu"] = best_val_fvu
+            wandb.run.summary["best_epoch"] = epoch + 1
         
         # Update learning rate
         if scheduler:
@@ -428,14 +701,14 @@ def main(args):
         
         # Log epoch summary
         lr_rate = scheduler.get_last_lr()[0] if scheduler else cfg.training.lr
-        logger.info(f"Epoch: {epoch+1}, Learning Rate: {lr_rate:.6f}, Loss: {loss.item():.6f}, Recon Loss: {recon_loss.item():.6f}, Sparse Loss: {sparse_loss.item():.6f}, Dead neurons: {numb_of_dead_neurons}")
-    
-        # Evaluate the model on the validation set
-        eval(model, eval_loader, loss_fn, device, cfg)
-
-        if args.dataset_second_modality is not None:
-            # Evaluate on the second modality dataset
-            eval(model, eval_loader_second, loss_fn, device, cfg)
+        logger.info(f"Epoch: {epoch+1}, Learning Rate: {lr_rate:.6f}, Loss: {epoch_avg_loss:.6f}, Recon Loss: {epoch_avg_recon:.6f}, Sparse Loss: {epoch_avg_sparse:.6f}, Dead neurons: {numb_of_dead_neurons}")
+        
+        # Evaluate on second modality if provided
+        if has_second_modality:
+            logger.info("Running second modality evaluation...")
+            second_modality_metrics = eval(model, eval_loader_second, loss_fn, device, cfg, prefix="second_modality")
+            wandb.log(second_modality_metrics,step=epoch+1)
+            #wandb.log(step=epoch+1)
     
     # Save the trained model
     # For Matryoshka models, append the first nesting level to activation name
@@ -455,19 +728,371 @@ def main(args):
     # Construct filename with key hyperparameters
     model_params = f"{cfg.model.n_latents}_{cfg.model.n_inputs}_{activation}{model_appendix}_{cfg.model.tied}_{cfg.model.normalize}_{cfg.model.latent_soft_cap}"
     dataset_name = args.dataset_train.split("/")[-1].split(".")[0]
-    save_path = f"{model_params}_{dataset_name}.pth"
+    if "BatchTopK" in args.model:
+        save_path = f"/BS/disentanglement/work/msae2/batchtopk/{model_params}_{dataset_name}.pth"
+    else:
+        save_path = f"/BS/disentanglement/work/msae2/{model_params}_{dataset_name}.pth"
     
     # Save model state and preprocessing parameters
-    torch.save({
+    checkpoint = {
         "model": model.state_dict(),
         "mean_center": train_ds.mean,
         "scaling_factor": train_ds.scaling_factor,
         "target_norm": train_ds.target_norm,
-    }, save_path)
+        "config": wandb_config,
+        "epoch": cfg.training.epochs,
+        "best_val_fvu": best_val_fvu,
+    }
+    torch.save(checkpoint, save_path)
     
     logger.info(f"Model saved to {save_path}")
-        
     
+    # Save model as WandB artifact
+    #artifact = wandb.Artifact(
+    #    name=f"sae-{model_type_str}-{args.model}-{wandb.run.id}",
+    #    type="model",
+    #    description=f"Trained {args.model} on {model_type_display} embeddings with expansion factor {args.expansion_factor}",
+    #    metadata={
+    #        "model_type": args.model,
+    #        "backbone": model_type_display,
+    #        "expansion_factor": args.expansion_factor,
+    #        "n_latents": cfg.model.n_latents,
+    #        "best_val_fvu": best_val_fvu,
+    #        "total_epochs": cfg.training.epochs,
+    #    }
+    #)
+    #artifact.add_file(save_path)
+    #wandb.log_artifact(artifact)
+    
+    #logger.info("Model artifact logged to WandB")
+    
+    # Log final summary statistics
+    wandb.run.summary.update({
+        "final/train_loss": epoch_avg_loss,
+        "final/val_fvu_sparse": val_metrics["val/fvu_sparse"],
+        "final/val_cknna_sparse": val_metrics["val/cknna_sparse"],
+        "final/dead_neurons": numb_of_dead_neurons,
+        "final/dead_neurons_ratio": numb_of_dead_neurons / cfg.model.n_latents,
+    })
+    
+    # Finish WandB run
+    wandb.finish()
+    logger.info("Training completed!")
+
+import torchvision.transforms as transforms
+from torchvision.datasets import ImageFolder
+from torch.utils.data import DataLoader
+
+def create_data_loaders(root: str, batch_size: int = 256, num_workers: int = 4, image_size: int = 224):
+    transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(image_size),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                             std=[0.229, 0.224, 0.225])
+    ])
+    dataset = ImageFolder(root=root, transform=transform)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
+                        num_workers=num_workers, pin_memory=True)
+    return loader, len(dataset)
+
+
+from metrics import (
+    explained_variance_full,
+    normalized_mean_absolute_error,
+    l0_messure,
+    cknna
+)
+import numpy as np
+import torch.nn as nn
+
+
+def test_feature_similarity(model, target_layer, dataloader, sae=None, device='cuda:0'):
+    """
+    Compute feature similarity metrics:
+    - Intra-class compactness (lower is better): how tight each class is
+    - Inter-class separability (higher is better): how far apart classes are
+    - Silhouette score (higher is better): ratio of inter to intra distances
+    """
+    model.eval()
+    activations = {}
+    
+    def hook_fn(module, input, output):
+        activations['layer'] = output.detach()
+    
+    layer = get_layer_by_path(model, target_layer)
+    handle = layer.register_forward_hook(hook_fn)
+    
+    # Collect activations per class
+    class_activations = {}
+    
+    with torch.no_grad():
+        for images, targets in tqdm(dataloader, desc="Collecting class activations"):
+            images = images.to(device)
+            model(images)
+            
+            acts = activations['layer']
+            
+            # Handle different architectures
+            if acts.dim() == 4:  # CNN
+                acts = acts.sum(dim=(2, 3))
+            elif acts.dim() == 3:  # ViT
+                acts = acts[:, 0, :]
+            
+            # Apply SAE if provided
+            if sae:
+                acts, _ = sae(acts)
+            
+            acts = acts.cpu()
+            
+            # Group by class
+            for act, target in zip(acts, targets):
+                class_id = target.item()
+                if class_id not in class_activations:
+                    class_activations[class_id] = []
+                class_activations[class_id].append(act)
+    
+    handle.remove()
+    
+    # Compute statistics
+    all_acts = []
+    class_means = []
+    class_stds = []
+    
+    for class_id, acts in class_activations.items():
+        stacked = torch.stack(acts)
+        all_acts.append(stacked)
+        class_means.append(stacked.mean(dim=0))
+        class_stds.append(stacked.std(dim=0).mean().item())
+    
+    all_activations = torch.cat(all_acts, dim=0)
+    global_std = all_activations.std(dim=0).mean().item()
+    
+    # Intra-class compactness (normalized)
+    avg_within_class_std = np.mean(class_stds)
+    intra_class_compactness = avg_within_class_std / global_std
+    
+    # Inter-class separability
+    inter_class_distances = []
+    for i in tqdm(range(len(class_means)), desc="Computing inter-class distances"):
+        for j in range(i + 1, len(class_means)):
+            dist = torch.norm(class_means[i] - class_means[j]).item()
+            inter_class_distances.append(dist)
+    
+    avg_inter_class_distance = np.mean(inter_class_distances)
+    inter_class_separability = avg_inter_class_distance / global_std
+    
+    # Silhouette-like score
+    silhouette_score = avg_inter_class_distance / avg_within_class_std
+    
+    return intra_class_compactness, inter_class_separability, silhouette_score
+
+
+
+
+def hc_eval(model_orig, model, layer_of_interest, eval_loader, device):
+    # Evaluation phase
+    cknna_score_sparse = []
+    fvu_score_sparse = []
+    diagonal_cs_sparse = []
+    mae_distance_sparse = []
+    od = []
+    sparsity_sparse = []
+    
+    orig_layer = get_layer_by_path(model_orig, layer_of_interest)
+    
+    layer_of_interest_dis = layer_of_interest + ".0"
+    layer_of_interest_merg = layer_of_interest + ".1"
+    layer_dis = get_layer_by_path(model, layer_of_interest_dis)
+    layer_merg = get_layer_by_path(model, layer_of_interest_merg)
+    
+    activations = {}
+    def get_activation():
+        def hook(model, input, output):
+            activations["input"] = input[0].detach()
+            activations["output"] = output.detach()
+        return hook
+    
+    handle = layer_merg.register_forward_hook(get_activation())
+    orig_handle = orig_layer.register_forward_hook(get_activation())
+    # Switch to evaluation mode
+    model.eval()
+    for images, targets in tqdm(eval_loader, desc="Evaluation"):
+        images = images.to(device)
+        
+        # Forward pass without gradient computation
+        with torch.no_grad():
+            model(images)
+            dis_embedding = activations["input"]
+            merg_embedding = activations["output"]
+            
+            model_orig(images)
+            embeddings = activations["output"]
+            
+            if embeddings.dim() == 4:
+                embeddings = embeddings.sum(dim=(2,3))
+                dis_embedding = dis_embedding.sum(dim=(2,3))
+                merg_embedding = merg_embedding.sum(dim=(2,3))
+            elif embeddings.dim() == 3:
+                embeddings = embeddings[:, 0, :]
+                dis_embedding = dis_embedding[:, 0, :]
+                merg_embedding = merg_embedding[:, 0, :]
+        
+        # Accumulate CKNNA scores
+        cknna_score_sparse.append(cknna(merg_embedding, embeddings, topk=10))
+        
+        # Accumulate similarity metrics
+        fvu_score_sparse.append(explained_variance_full(embeddings, merg_embedding))
+        mae_distance_sparse.append(normalized_mean_absolute_error(embeddings, merg_embedding))
+        diagonal_cs_sparse.append((torch.nn.functional.cosine_similarity(embeddings, merg_embedding)))
+        sparsity_sparse.append((l0_messure(dis_embedding)))
+        
+        # Accumulate orthogonality measure
+        if isinstance(layer_dis, nn.Conv2d):
+            od.append(orthogonal_decoder(layer_dis.weight.view(layer_dis.weight.size(0), -1)))
+        else:
+            od.append(orthogonal_decoder(layer_dis.weight))
+    
+    size = dis_embedding.shape[1] / merg_embedding.shape[1] #test_size(layer_dis) + test_size(layer_merg)
+    print(dis_embedding.shape, merg_embedding.shape)
+    logger.info(f"  Model size: {size:.6f}")
+
+    
+    mae_distance_sparse = torch.cat(mae_distance_sparse, dim=0).cpu().numpy()
+    diagonal_cs_sparse = torch.cat(diagonal_cs_sparse, dim=0).cpu().numpy()
+    sparsity_sparse = torch.cat(sparsity_sparse, dim=0).cpu().numpy()
+    fvu_score_sparse = torch.cat(fvu_score_sparse, dim=0).cpu().numpy()
+    cknna_score_sparse = np.array(cknna_score_sparse)
+    
+    # Log evaluation metrics (averaged over batches)
+    logger.info("Evaluation results:")
+    logger.info(f"  FVU Sparse: {np.mean(fvu_score_sparse):.4f}")
+    logger.info(f"  CKNNA Sparse: {np.mean(cknna_score_sparse):.4f}")
+    logger.info(f"  Cosine Similarity Sparse: {np.mean(diagonal_cs_sparse):.4f}")
+    logger.info(f"  MAE Distance Sparse: {np.mean(mae_distance_sparse):.4f}")
+    logger.info(f"  Sparsity Sparse: {np.mean(sparsity_sparse):.4f}")
+    logger.info(f"  Orthogonal Decoder Loss: {np.mean(od):.6f}")
+    
+    handle.remove()
+    orig_handle.remove()
+
+import torchvision
+import torchvision.transforms as transforms
+from torchvision.datasets import ImageFolder, CelebA
+
+def get_model(model_name: str, device: str):
+    """
+    Returns a model for image embeddings.
+    """
+    if model_name.lower() == "resnet50":
+        model = torchvision.models.resnet50(pretrained=True)
+        embedding_dim = 2048 
+        layer_path="layer4.2.conv3"
+    elif model_name.lower() == "convnext_tiny":
+        model = torchvision.models.convnext_tiny(pretrained=True)
+        embedding_dim = 768
+    elif model_name.lower() == "vit_b_16":
+        model = torchvision.models.vit_b_16(pretrained=True)
+        embedding_dim = 768
+        layer_path = "encoder.layers.encoder_layer_11.mlp.3"
+    elif model_name.lower() == "dinov2_vitl14":
+        import torch.hub
+        model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14')
+        embedding_dim =1024
+        layer_path="blocks.23.mlp.fc2"
+    else:
+        raise ValueError(f"Unsupported model {model_name}")
+    
+    model.to(device).eval()
+    return model, layer_path, embedding_dim
+
+def test_size(model) -> float:
+    """Return total number of parameters in millions."""
+    print("Computing model size...")
+    total_params = sum(p.numel() for p in model.parameters())
+    return round(total_params / 1_000_000, 1)
+
+
+
+import torch
+import torch.nn as nn
+from pathlib import Path
+import numpy as np
+from tqdm import tqdm
+
+def get_layer_by_path(model, path):
+    """Navigate to a layer using dot notation path."""
+    parts = path.split('.')
+    current = model
+    
+    for part in parts:
+        if part.isdigit():
+            current = current[int(part)]
+        else:
+            current = getattr(current, part)
+    
+    return current
+
+import gc
+
+
+def hc_main(args):
+    set_seed(0)
+    
+    dis_resnet_003, _ = ut.load_fully_multi_disentangled_resnet(tau=0.03)
+    
+    #dis_vit_003, _ = ut.load_fully_multi_disentangled_vit(tau=0.03)
+    #dis_vit_002, _ = ut.load_fully_multi_disentangled_vit(tau=0.02)
+    #dis_vit_001, _ = ut.load_fully_multi_disentangled_vit(tau=0.01)
+    
+    eval_ds_res = SAEDataset(
+        "/BS/disentanglement/work/sae/imagenet_resnet50_input_embeddings_val.npy", 
+        dtype=torch.float32, 
+        mean_center=True, 
+        target_norm=None,
+        split="val",
+        model_type="resnet50"
+    )
+    
+    
+    dataloader, _ = create_data_loaders("/scratch/inf0/user/mparcham/ILSVRC2012/val_categorized", num_workers=0)
+    
+    model_orig, _, _ = get_model("resnet50", "cuda:0")
+    layer_of_interest = "layer4.2.conv3.0"
+    dis_resnet_001, _ = ut.load_fully_multi_disentangled_resnet(tau=0.01)
+    #hc_eval(model_orig=model_orig, model=dis_resnet_002, layer_of_interest="layer4.2.conv3", eval_loader=dataloader, device="cuda:0")
+    #hc_eval(model_orig=model_orig, model=dis_resnet_001, layer_of_interest="layer4.2.conv3", eval_loader=dataloader, device="cuda:0")
+    
+    
+    #print("resnet_003", monosemanticity_score(experiment_name="resnet_0.03", model=dis_resnet_003, target_layer=layer_of_interest, val_loader=dataloader, sae=None, device="cuda:0"))
+    #print("resnet_002", monosemanticity_score(experiment_name="resnet_0.02", model=dis_resnet_002, target_layer=layer_of_interest, val_loader=dataloader, sae=None, device="cuda:0"))
+    
+    #layer_of_interest = "layer4.2.conv3"
+    #print("resnet_orig", monosemanticity_score(experiment_name="resnet_orig", model=model_orig, target_layer=layer_of_interest, val_loader=dataloader, sae=None, device="cuda:0"))
+    
+    model_orig, _, _ = get_model("vit_b_16", "cuda:0")
+    layer_of_interest = "encoder.layers.encoder_layer_11.mlp.3"
+    #hc_eval(model_orig=model_orig, model=dis_vit_001, layer_of_interest=layer_of_interest, eval_loader=dataloader, device="cuda:0")
+    #hc_eval(model_orig=model_orig, model=dis_vit_002, layer_of_interest=layer_of_interest, eval_loader=dataloader, device="cuda:0")
+    #hc_eval(model_orig=model_orig, model=dis_vit_003, layer_of_interest=layer_of_interest, eval_loader=dataloader, device="cuda:0")
+    
+    #print("vit_003", monosemanticity_score(experiment_name="vit_0.03", model=dis_vit_003, target_layer=layer_of_interest, val_loader=dataloader, sae=None, device="cuda:0"))
+    #print("vit_002", monosemanticity_score(experiment_name="vit_0.02", model=dis_vit_002, target_layer=layer_of_interest, val_loader=dataloader, sae=None, device="cuda:0"))
+    #print("vit_001", monosemanticity_score(experiment_name="vit_0.01", model=dis_vit_001, target_layer=layer_of_interest, val_loader=dataloader, sae=None, device="cuda:0"))
+    
+    layer_of_interest = "encoder.layers.encoder_layer_11.mlp.3"
+    #print("vit_orig", monosemanticity_score(experiment_name="vit_orig", model=model_orig, target_layer=layer_of_interest, val_loader=dataloader, sae=None, device="cuda:0"))
+    
+    model_orig, layer_of_interest, dimen = get_model("dinov2_vitl14", "cuda:0")
+    model_orig2, _, _ = get_model("dinov2_vitl14", "cuda:0")
+    dis_dino_002, _ = ut.load_fully_multi_disentangled_dinov2(model_orig2, tau=0.02)
+    hc_eval(model_orig=model_orig, model=dis_dino_002, layer_of_interest=layer_of_interest, eval_loader=dataloader, device="cuda:0")
+    
+    return
+
 if __name__ == "__main__":
     args = parse_args()
-    main(args)
+    if args.eval_hc:
+        hc_main(args)
+    else:
+        main(args)

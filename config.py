@@ -43,8 +43,8 @@ class TrainConfig:
     epochs: int = 30
     batch_size: int = 4096
     clip_grad: float = 1.0
-    check_dead: int = 1000
-    print_freq: int = 100
+    check_dead: int = 100000
+    print_freq: int = 100000
     num_workers: int = 0
 
 @dataclasses.dataclass

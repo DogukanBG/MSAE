@@ -8,6 +8,10 @@ from sklearn.metrics import f1_score
 from sae import load_model
 from utils import SAEDataset, set_seed, get_device
 
+import pandas as pd
+import os
+import utils as ut
+
 """
 Linear Probe Evaluation for Sparse Autoencoders
 
@@ -52,7 +56,11 @@ def parse_args() -> argparse.Namespace:
                        help="Batch size for training and evaluation")
     parser.add_argument("-s", "--seed", type=int, default=42, 
                        help="Random seed for reproducibility")
-    parser.add_argument("-w", "--num-workers", type=int, default=8, 
+    parser.add_argument("-w", "--num-workers", type=int, default=0, 
+                       help="Number of worker processes for data loading")
+    parser.add_argument("--tau", type=float, default=0.03, 
+                       help="Number of worker processes for data loading")
+    parser.add_argument("--eval-hc", type=bool, default=False, 
                        help="Number of worker processes for data loading")
 
     return parser.parse_args()
@@ -83,7 +91,7 @@ def valid_linear_probe(model: torch.nn.Module, linear_probe: torch.nn.Module,
     """
     linear_probe.eval()
     dataloader = torch.utils.data.DataLoader(
-        dataset, batch_size=batch_size, shuffle=False, num_workers=2,
+        dataset, batch_size=batch_size, shuffle=False, num_workers=0,
         pin_memory=True
     )
 
@@ -132,6 +140,109 @@ def valid_linear_probe(model: torch.nn.Module, linear_probe: torch.nn.Module,
     return kl, arg_max
 
 
+import torchvision.transforms as transforms
+from torchvision.datasets import ImageFolder
+from torch.utils.data import DataLoader
+
+def create_data_loaders(root: str, batch_size: int = 256, num_workers: int = 4, image_size: int = 224):
+    transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(image_size),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                             std=[0.229, 0.224, 0.225])
+    ])
+    dataset = ImageFolder(root=root, transform=transform)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
+                        num_workers=num_workers, pin_memory=True)
+    return loader
+
+def get_layer_by_path(model, path):
+    """Navigate to a layer using dot notation path."""
+    parts = path.split('.')
+    current = model
+    
+    for part in parts:
+        if part.isdigit():
+            current = current[int(part)]
+        else:
+            current = getattr(current, part)
+    
+    return current
+
+
+def valid_linear_probe_hc(model, hc_model, linear_probe, dataloader, layer_of_interest, device):
+    
+    linear_probe.eval()
+    
+    orig_layer = get_layer_by_path(model, layer_of_interest)
+    
+    layer_dis = get_layer_by_path(hc_model, layer_of_interest)
+    
+    activations = {}
+    def get_activation():
+        def hook(model, input, output):
+            #activations["input"] = input[0].detach()
+            activations["output"] = output.detach()
+        return hook
+    
+    handle = layer_dis.register_forward_hook(get_activation())
+    orig_handle = orig_layer.register_forward_hook(get_activation())
+    
+    with torch.no_grad():
+        kl = []
+        arg_max = []
+        for images, labels in tqdm(dataloader, desc="Evaluating semantic preservation"):
+            images = images.to(device)
+            model(images)
+            act_orig = activations["output"]
+            
+            hc_model(images)
+            act_recon = activations["output"]
+            
+            if act_orig.dim() == 4:
+                act_orig=act_orig.sum(dim=(2,3))
+                act_recon=act_recon.sum(dim=(2,3))
+            else:
+                act_orig=act_orig[:, 0, :]
+                act_recon=act_recon[:, 0, :]
+                
+                        # Normalize data (cosine normalization)
+            data_norm = act_orig / act_orig.norm(dim=-1, keepdim=True)
+            data_reconstruction_norm = act_recon / act_recon.norm(dim=-1, keepdim=True)
+
+            # Get predictions from linear probe
+            data_predicted = linear_probe(data_norm)
+            data_reconstruction_predicted = linear_probe(data_reconstruction_norm)
+
+            # Apply softmax to get proper probability distributions
+            data_predicted_prob = torch.nn.functional.softmax(data_predicted, dim=1)
+            data_reconstruction_predicted_prob = torch.nn.functional.softmax(data_reconstruction_predicted, dim=1)
+
+            # Calculate KL divergence for each sample in the batch
+            for i in range(act_orig.shape[0]):
+                # Extract individual sample predictions
+                orig_pred = data_predicted_prob[i:i+1]
+                recon_pred = data_reconstruction_predicted_prob[i:i+1]
+                
+                # KL divergence between the probability distributions
+                kl_value = torch.nn.functional.kl_div(
+                    recon_pred.log(),
+                    orig_pred,
+                    reduction='batchmean'
+                ).item()
+                kl.append(kl_value)
+                
+                # Check if the predicted class is the same (argmax agreement)
+                orig_class = torch.argmax(data_predicted[i])
+                recon_class = torch.argmax(data_reconstruction_predicted[i])
+                arg_max.append((orig_class == recon_class).item())
+            
+    handle.remove()
+    orig_handle.remove()
+    
+    return kl, arg_max
+
 def evaluate_linear_probe(linear_probe: torch.nn.Module, 
                          dataset: torch.utils.data.Dataset, 
                          device: torch.device) -> float:
@@ -148,7 +259,7 @@ def evaluate_linear_probe(linear_probe: torch.nn.Module,
     """
     linear_probe.eval()
     dataloader = torch.utils.data.DataLoader(
-        dataset, batch_size=64, shuffle=False, num_workers=2
+        dataset, batch_size=64, shuffle=False, num_workers=0
     )
 
     all_targets = []
@@ -174,7 +285,8 @@ def evaluate_linear_probe(linear_probe: torch.nn.Module,
     return f1_score(all_targets, all_predictions, average="macro")
 
 
-def train_linear_probe(model: torch.nn.Module, dataset: torch.utils.data.Dataset, 
+
+def train_linear_probe(model_name, model: torch.nn.Module, dataset: torch.utils.data.Dataset, 
                       eval_dataset: torch.utils.data.Dataset, target_path: str, 
                       eval_target_path: str, device: torch.device, 
                       batch_size: int, num_workers: int) -> torch.nn.Module:
@@ -199,7 +311,7 @@ def train_linear_probe(model: torch.nn.Module, dataset: torch.utils.data.Dataset
         
     Returns:
         torch.nn.Module: The trained linear probe (classifier)
-    """
+    """    
     # Create data loaders to efficiently load data in batches
     train_dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers
@@ -264,7 +376,7 @@ def train_linear_probe(model: torch.nn.Module, dataset: torch.utils.data.Dataset
     )
 
     # Define training hyperparameters
-    epochs = 100
+    epochs = 50
     patience = 5  # Number of epochs to wait for improvement
     n_classes = len(unique_target)
     
@@ -277,9 +389,21 @@ def train_linear_probe(model: torch.nn.Module, dataset: torch.utils.data.Dataset
     # Define optimizer, scheduler and loss function
     optimizer = torch.optim.AdamW(linear_probe.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=0.5, patience=5, verbose=True
+        optimizer, mode='max', factor=0.5, patience=5
     )
     criterion = torch.nn.CrossEntropyLoss()
+    
+    save_path = f"/BS/disentanglement/work/sae/linear_probe/linear_probe_best_{model_name}.pth"
+    if os.path.exists(save_path):
+        logger.info(f"Model already exists at {save_path}. Loading it instead of training...")
+        linear_probe = torch.nn.Sequential(
+            torch.nn.Linear(model.n_inputs, len(unique_target)),
+        )
+        linear_probe.load_state_dict(torch.load(save_path)["model_state_dict"])
+        linear_probe.to(device)
+        return linear_probe
+    else:
+        logger.info("No existing model found. Starting training...")
 
     logger.info(f"Training linear probe with {n_classes} classes for {epochs} epochs")
     best_acc = 0.0
@@ -333,9 +457,45 @@ def train_linear_probe(model: torch.nn.Module, dataset: torch.utils.data.Dataset
     # Load best model
     linear_probe.load_state_dict(best_model)
     logger.info(f"Linear probe training complete with best eval F1: {best_acc:.4f}")
+    
+    save_path = f"/BS/disentanglement/work/sae/linear_probe/linear_probe_best_{model_name}.pth"
+    torch.save({
+        "model_state_dict": best_model,
+        "label_mapping": unique_target,  # Optional: to keep track of labels
+    }, save_path)
+    logger.info(f"Saved best model to {save_path}")
 
     return linear_probe
 
+import torchvision
+def get_model(model_name: str, device: str):
+    """
+    Returns a model for image embeddings.
+    """
+    if model_name.lower() == "resnet50":
+        model = torchvision.models.resnet50(pretrained=True)
+        #model = nn.Sequential(*list(model.children())[:-1])  # Remove classifier
+        embedding_dim = 2048 
+        layer_path="layer4.2.conv3"
+    elif model_name.lower() == "convnext_tiny":
+        model = torchvision.models.convnext_tiny(pretrained=True)
+        #model = nn.Sequential(*list(model.features), nn.AdaptiveAvgPool2d(1))
+        embedding_dim = 768
+    elif model_name.lower() == "vit_b_16":
+        model = torchvision.models.vit_b_16(pretrained=True)
+        #model.heads = nn.Identity()
+        embedding_dim = 768
+        layer_path = "encoder.layers.encoder_layer_11.mlp.3"
+    elif model_name.lower() == "dinov2_vitl14":
+        import torch.hub
+        model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14')
+        embedding_dim =1024
+        layer_path="blocks.23.mlp.fc2"
+    else:
+        raise ValueError(f"Unsupported model {model_name}")
+    
+    model.to(device).eval()
+    return model, layer_path, embedding_dim
 
 def main(args):
     """
@@ -363,38 +523,60 @@ def main(args):
     model.eval()
     logger.info(f"Model loaded: {args.model}")
     
+    model_type = None
+    if "resnet50" in args.model:
+        model_type = "resnet50"
+    elif "vit_b_16" in args.model:
+        model_type = "vit_b_16"
+    elif "dinov2_vitl14" in args.model:
+        model_type = "dinov2_vitl14"
+            
     # Load the dataset with appropriate preprocessing
     if ("text" in args.model and "text" in args.data) or ("image" in args.model and "image" in args.data):
         logger.info("Using model mean and scalling factor")    
-        train_ds = SAEDataset(args.data)
+        train_ds = SAEDataset(args.data,split="train", model_type=model_type)
         train_ds.mean = mean_center.cpu()
         train_ds.scaling_factor = scaling_factor
     else:    
         logger.info("Computing mean and scalling factor")    
-        train_ds = SAEDataset(args.data, mean_center=True if mean_center.sum() != 0.0 else False, target_norm=target_norm)
+        train_ds = SAEDataset(args.data, mean_center=True if mean_center.sum() != 0.0 else False, target_norm=target_norm, split="train", model_type=model_type)
     logger.info(f"Training dataset loaded with {len(train_ds)} samples")
     
     if ("text" in args.model and "text" in args.eval_data) or ("image" in args.model and "image" in args.eval_data):
         logger.info("Using model mean and scalling factor")    
-        eval_ds = SAEDataset(args.eval_data)
+        eval_ds = SAEDataset(args.eval_data, split="val", model_type=model_type)
         eval_ds.mean = mean_center.cpu()
         eval_ds.scaling_factor = scaling_factor
     else:    
         logger.info("Computing mean and scalling factor")    
-        eval_ds = SAEDataset(args.eval_data, mean_center=True if mean_center.sum() != 0.0 else False, target_norm=target_norm)
+        eval_ds = SAEDataset(args.eval_data, mean_center=True if mean_center.sum() != 0.0 else False, target_norm=target_norm, split="val", model_type=model_type)
     logger.info(f"Evaluation dataset loaded with {len(eval_ds)} samples")
 
     # Train the linear probe classifier
     logger.info("Training linear probe classifier...")
+    model_name=model_type
     linear_probe = train_linear_probe(
+        model_name,
         model, train_ds, eval_ds, args.target, args.eval_target, 
         device, args.batch_size, args.num_workers
     )
     
     # Evaluate semantic preservation
+    model_orig, layer_path, _ = get_model(model_type, device)
+    
     logger.info("Evaluating semantic preservation in reconstructions...")
-    train_kl, train_arg_max = valid_linear_probe(model, linear_probe, train_ds, device, args.batch_size)
-    eval_kl, eval_arg_max = valid_linear_probe(model, linear_probe, eval_ds, device, args.batch_size)
+    if args.eval_hc:
+        dataLoader = create_data_loaders("/scratch/inf0/user/mparcham/ILSVRC2012/val_categorized")
+        if model_type == "resnet50":
+            hc_model, _ = ut.load_fully_multi_disentangled_resnet(tau=args.tau)
+        elif model_type == "vit_b_16":
+            hc_model, _ = ut.load_fully_multi_disentangled_vit(tau=args.tau)
+        eval_kl, eval_arg_max = valid_linear_probe_hc(model_orig, hc_model, linear_probe, dataLoader, layer_path, device)
+                                #model, hc_model, linear_probe, dataloader, layer_of_interest, device
+        train_kl, train_arg_max = eval_kl, eval_arg_max
+    else:
+        train_kl, train_arg_max = valid_linear_probe(model, linear_probe, train_ds, device, args.batch_size)
+        eval_kl, eval_arg_max = valid_linear_probe(model, linear_probe, eval_ds, device, args.batch_size)
 
     # Report results
     logger.info("Results Summary:")
@@ -405,6 +587,18 @@ def main(args):
     logger.info("Evaluation Set:")
     logger.info(f"  KL Divergence: {np.mean(eval_kl):.4f} ± {np.std(eval_kl):.4f}")
     logger.info(f"  Class Prediction Agreement: {np.mean(eval_arg_max)*100:.2f}% ± {np.std(eval_arg_max)*100:.2f}%")
+    
+    results = {
+            "Model Name": [args.model],
+            "KL Divergence": [np.mean(eval_kl)],
+            "Class Prediction Agreement": [np.mean(eval_arg_max)*100]
+        }
+
+    df = pd.DataFrame(results)
+
+    # Append instead of overwrite
+    csv_file = "/BS/disentanglement/work/Disentanglement/MSAE/results_linear.csv" if not args.eval_hc else "/BS/disentanglement/work/Disentanglement/MSAE/results_linear_hc.csv"
+    df.to_csv(csv_file, mode="a", index=False, header=not os.path.exists(csv_file))
     
     logger.info("Interpretation:")
     logger.info("  - Lower KL Divergence indicates better preservation of semantic information")

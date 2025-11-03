@@ -80,6 +80,86 @@ class SAELoss(torch.nn.Module):
         """Human-readable string representation."""
         return f"{self.reconstruction_loss}_{self.sparse_loss}_{self.sparse_weight}"
 
+#TODO: Implement Loss Function
+#TODO: Implement Flexible AutoEncoder
+class BCOSLoss(torch.nn.Module):
+    """
+    Combined loss function for Bcos Autoencoders (B-AE).
+    
+    Combines a reconstruction loss term with a cosine similarity loss that applies alignment pressure 
+    to weights and latent representations.
+    The reconstruction loss measures how well the autoencoder reconstructs its inputs,
+    while the cosine similarities loss encourages the activation space of the images to align with the weights.
+    
+    Attributes:
+        reconstruction_loss (str): Name of the reconstruction loss function.
+        reconstruction_loss_fn (callable): Function for computing reconstruction loss.
+        sim_loss (str): Name of the similarity loss function.
+        sim_loss_fn (callable): Function for computing similarity loss.
+        sim_weight (float): Coefficient for the similarity loss term.
+        mean_input (torch.Tensor, optional): Mean input vector used for normalization.
+    """
+    
+    def __init__(
+        self,
+        reconstruction_loss: str = "mse",
+        sim_loss: str = "cos",
+        sim_weight: float = 0.0,
+        mean_input: torch.Tensor = None,
+    ):
+        """
+        Initialize the B-AE loss function.
+        
+        Args:
+            reconstruction_loss (str): Type of reconstruction loss ("mse" or "cosine").
+            sparse_loss (str): Type of sparsity regularization ("l1", "l0", or "tanh").
+            sparse_weight (float): Weight coefficient for the sparsity loss term.
+            mean_input (torch.Tensor, optional): Mean input vector used for normalization
+                                                in certain loss functions.
+        """
+        super().__init__()
+        self.reconstruction_loss = reconstruction_loss
+        self.reconstruction_loss_fn = get_recon_loss_fn(reconstruction_loss)
+        self.sim_loss = sim_loss
+        self.sim_loss_fn = get_sim_loss_fn(sim_loss)
+        self.sim_weight = sim_weight
+        self.mean_input = mean_input
+
+    def forward(
+        self,
+        reconstruction: torch.Tensor,
+        original_input: torch.Tensor,
+        latent_activations: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Compute the combined loss for the sparse autoencoder.
+        
+        Args:
+            reconstruction: Output of Autoencoder.decode (shape: [batch, n_inputs])
+            original_input: Input of Autoencoder.encode (shape: [batch, n_inputs])
+            latent_activations: Output of Autoencoder.encode (shape: [batch, n_latents])
+        
+        Returns:
+            tuple: (total_loss, reconstruction_loss, sparsity_loss)
+                - total_loss: Combined weighted loss
+                - reconstruction_loss: Loss measuring reconstruction quality
+                - sparsity_loss: Loss measuring latent space sparsity
+        """
+        recon_loss = self.reconstruction_loss_fn(reconstruction, original_input, self.mean_input)
+        sim_loss = self.sim_loss_fn(latent_activations, original_input)
+        return (
+            recon_loss + self.sim_weight * sim_loss,
+            recon_loss,
+            sim_loss
+        )
+    
+    def __repr__(self):
+        """String representation for debugging."""
+        return f"BCOSLoss(reconstruction_loss={self.reconstruction_loss}, sim_loss={self.sparse_loss}, sim_weight={self.sparse_weight})"
+    
+    def __str__(self):
+        """Human-readable string representation."""
+        return f"{self.reconstruction_loss}_{self.sim_loss}_{self.sim_weight}"
 
 def mean_squared_error(
     reconstruction: torch.Tensor,
@@ -199,6 +279,9 @@ def normalized_L1_loss(
     return (latent_activations.abs().sum(dim=-1) / original_input.norm(dim=-1)).mean()
 
 
+def cosine_similarity(latent, weights):
+    return
+
 # Mapping of reconstruction loss function names to their implementations
 RECON_LOSSES_MAP = {
     "mse": mean_squared_error,
@@ -213,6 +296,12 @@ SPARSITY_LOSSES_MAP = {
     "l0": L0_loss,
 }
 
+SIMILARITY_LOSS = {
+    "cos_sim": cosine_similarity
+}
+
+def get_sparse_loss_fn(sim_loss: str) -> callable:
+    return SIMILARITY_LOSS[sim_loss]
 
 def get_recon_loss_fn(recon_loss: str) -> callable:
     """

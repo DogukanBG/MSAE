@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
                        help="Batch size for cost matrix computation")
     parser.add_argument("-r", "--seed", type=int, default=42, 
                        help="Random seed for reproducibility")
-    parser.add_argument("--decoder", action="store_true",
+    parser.add_argument("--decoder",default=False,# action="store_true",
                        help="Use decoder weights instead of encoder weights")
     
     return parser.parse_args()
@@ -120,6 +120,8 @@ def main(args):
     
     # Load the trained models
     model_1 = load_model(args.sae_1)[0]
+    print(args.sae_1)
+    print(args.sae_2)
     model_1.eval()
     logger.info(f"Loaded first model")
     

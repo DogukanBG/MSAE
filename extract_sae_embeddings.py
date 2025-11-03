@@ -4,6 +4,7 @@ import logging
 import argparse
 import numpy as np
 from tqdm import tqdm
+import random
 
 from sae import load_model
 from utils import SAEDataset, set_seed, get_device
@@ -11,8 +12,10 @@ from metrics import (
     explained_variance_full,
     normalized_mean_absolute_error,
     l0_messure,
-    cknna
+    cknna,
+    orthogonal_decoder
 )
+import pandas as pd
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,6 +26,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def set_seed(seed: int) -> None:
+    """
+    Set random seeds for reproducibility across all random number generators.
+    
+    Args:
+        seed (int): The seed value to use
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 def parse_args() -> argparse.Namespace:
     """
@@ -46,7 +60,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def get_representation(model, dataset, repr_file_name, batch_size):
+def test_size(model) -> float:
+    """Return total number of parameters in millions."""
+    print("Computing model size...")
+    total_params = sum(p.numel() for p in model.parameters())
+    return round(total_params / 1_000_000, 1)
+
+
+def get_representation(model_path_name, model, dataset, repr_file_name, batch_size):
     """
     Extract representations from the model for the given dataset and evaluate model performance.
     
@@ -102,6 +123,21 @@ def get_representation(model, dataset, repr_file_name, batch_size):
         sparse_cknnas = []
         dead_neurons_count = None
         
+        size = test_size(model) #+ test_size(model.encoder)
+        do = orthogonal_decoder(model.decoder)
+        #results = {
+        #    "Model Name": [model_path_name],
+        #    "DO": [do]
+        #}
+        
+        #df = pd.DataFrame(results)
+
+        # Append instead of overwrite
+        #csv_file = "/BS/disentanglement/work/Disentanglement/MSAE/results_do.csv"
+        #df.to_csv(csv_file, mode="a", index=False, header=not os.path.exists(csv_file))
+        
+        #print(results)
+
         # Process data in batches
         for idx, batch in enumerate(tqdm(dataloader, desc="Extracting representations")):
             start = batch_size * idx
@@ -175,9 +211,73 @@ def get_representation(model, dataset, repr_file_name, batch_size):
         logger.info(f"\nSparse Fraction of Variance Unexplained (FVU): {np.mean(sparse_fvu)} +/- {np.std(sparse_fvu)}")
         logger.info(f"Sparse Normalized MAE: {np.mean(sparse_mae)} +/- {np.std(sparse_mae)}")
         logger.info(f"Sparse Cosine similarity: {np.mean(sparse_cs)} +/- {np.std(sparse_cs)}")
-        logger.info(f"Sparse L0 messure: {np.mean(sparse_l0)} +/- {np.std(sparse_l0)}")
+        logger.info(f"Sparse L0 measure: {np.mean(sparse_l0)} +/- {np.std(sparse_l0)}")
         logger.info(f"Sparse CKNNA: {np.mean(sparse_cknnas)} +/- {np.std(sparse_cknnas)}")
+        
+        results = {
+            "Model Name": [model_path_name],
+            "Number of dead neurons": [number_of_dead_neurons],
+            "Fraction of Variance Unexplained (FVU)": [np.mean(sparse_fvu)],
+            "Normalized MAE": [np.mean(sparse_mae)],
+            "Cosine similarity": [np.mean(sparse_cs)],
+            "L0 measure": [np.mean(sparse_l0)],
+            "CKNNA": [np.mean(sparse_cknnas)],
+            "DO": [do],
+            "Size": [size]
+        }
 
+        df = pd.DataFrame(results)
+
+        # Append instead of overwrite
+        csv_file = "/BS/disentanglement/work/Disentanglement/MSAE/results_sae.csv"
+        df.to_csv(csv_file, mode="a", index=False, header=not os.path.exists(csv_file))
+
+import torchvision
+def get_model(model_name: str, device: str):
+    """
+    Returns a model for image embeddings.
+    """
+    if model_name.lower() == "resnet50":
+        model = torchvision.models.resnet50(pretrained=True)
+        #model = nn.Sequential(*list(model.children())[:-1])  # Remove classifier
+        embedding_dim = 2048 
+        layer_path="layer4.2.conv3" 
+    elif model_name.lower() == "convnext_tiny":
+        model = torchvision.models.convnext_tiny(pretrained=True)
+        #model = nn.Sequential(*list(model.features), nn.AdaptiveAvgPool2d(1))
+        embedding_dim = 768
+    elif model_name.lower() == "vit_b_16":
+        model = torchvision.models.vit_b_16(pretrained=True)
+        #model.heads = nn.Identity()
+        embedding_dim = 768
+        layer_path = "encoder.layers.encoder_layer_11.mlp.3" 
+    elif model_name.lower() == "dinov2_vitl14":
+        import torch.hub
+        model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14')
+        embedding_dim =1024
+        layer_path="blocks.23.mlp.fc2" 
+    else:
+        raise ValueError(f"Unsupported model {model_name}")
+    
+    model.to(device).eval()
+    return model, layer_path, embedding_dim
+
+import torchvision.transforms as transforms
+from torchvision.datasets import ImageFolder
+from torch.utils.data import DataLoader
+
+def create_data_loaders(root: str, batch_size: int = 256, num_workers: int = 0, image_size: int = 224):    
+    transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(image_size),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                             std=[0.229, 0.224, 0.225])
+    ])
+    dataset = ImageFolder(root=root, transform=transform)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
+                        num_workers=num_workers, pin_memory=True)
+    return loader, len(dataset)
 
 def main(args):
     """
@@ -193,25 +293,101 @@ def main(args):
     model, mean_center, scaling_factor, target_norm = load_model(args.model)
     logger.info("Model loaded")
     
+    model_type = None
+    if "resnet50" in args.data:
+        model_type = "resnet50"
+    elif "vit_b_16" in args.data:
+        model_type = "vit_b_16"
+    elif "dinov2_vitl14" in args.data:
+        model_type = "dinov2_vitl14"
+        
+    model_orig, layer_path, embedding_dim = get_model(model_name=model_type, device="cuda:0")
+    
     # Load the dataset with appropriate preprocessing
     if ("text" in args.model and "text" in args.data) or ("image" in args.model and "image" in args.data):
         logger.info("Using model mean and scalling factor")    
-        dataset = SAEDataset(args.data)
+        dataset = SAEDataset(args.data, split="val", model_type=model_type)
         dataset.mean = mean_center.cpu()
         dataset.scaling_factor = scaling_factor
     else:    
         logger.info("Computing mean and scalling factor")    
-        dataset = SAEDataset(args.data, mean_center=True if mean_center.sum() != 0.0 else False, target_norm=target_norm)
+        dataset = SAEDataset(args.data, mean_center=True if mean_center.sum() != 0.0 else False, target_norm=target_norm, split="val", model_type=model_type)
         
     logger.info(f"Dataset loaded with length: {len(dataset)}")
     logger.info(f"Dataset mean center: {dataset.mean.mean()}, Scaling factor: {dataset.scaling_factor} with target norm {dataset.target_norm}")
     # Construct output filename from model and data names
-    model_path_name = args.model.split("/")[-1].replace(".pt","")
+    model_path_name = args.model.split("/")[-1].replace(".pt","") if not ("batchtopk" in args.model) else args.model.split("/")[-1].replace(".pt","") + "batchtopk"
     data_path_name = args.data.split("/")[-1].replace(".npy","")
     repr_file_name = os.path.join(args.output_path, f"{data_path_name}_{model_path_name}")
     
     # Extract representations and compute metrics
-    get_representation(model, dataset, repr_file_name, args.batch_size)
+    #get_representation(model_path_name, model, dataset, repr_file_name, args.batch_size)
+    dataloader, _ = create_data_loaders("/scratch/inf0/user/mparcham/ILSVRC2012/val_categorized", num_workers=0)
+    import metrics as m
+    
+    # Example usage:
+
+    # Run the metric (first time - will compute and cache)
+    experiment_name = model_path_name
+    metrics = m.compute_neuron_clustering_metric(
+        model=model_orig,
+        target_layer=layer_path,
+        val_loader=dataloader,
+        k=100,
+        patch_size=64,
+        experiment_name=experiment_name,
+        save_dir="/scratch/inf0/user/dbagci/pure",
+        device='cuda',
+        sae=model,
+        min_cluster_size=5,
+        min_samples=3,
+        recompute_patches=False,
+        recompute_activations=False
+    )
+    
+    # metrics = m.compute_neuron_clustering_metric_optimized(
+    #     model=model_orig,
+    #     target_layer=layer_path,
+    #     val_loader=dataloader,
+    #     k=100,
+    #     patch_size=64,
+    #     experiment_name=experiment_name,
+    #     save_dir="/scratch/inf0/user/dbagci/pure",
+    #     device='cuda',
+    #     sae=model,
+    #     min_cluster_size=5,
+    #     min_samples=3,
+    #     recompute_patches=False,
+    #     recompute_activations=False,
+    #     clip_batch_size=100,
+    #     neurons_per_batch=5
+    # )
+
+    # # Run again - will load from cache instantly
+    # metrics = m.neuron_activation_clustering_metric(
+    #     model=model_orig,
+    #     sae=model,
+    #     target_layer=layer_path,
+    #     val_loader=dataloader,
+    #     experiment_name=experiment_name,  # Same name loads cache
+    #     use_cache=True
+    # )
+
+    
+    results = {
+         "Model Name": [args.model],
+         "Intra Score": [metrics[0]],
+         "Inter Score": [metrics[1]],
+         "Ratio": [metrics[2]]
+    }
+    
+    df = pd.DataFrame(results)
+
+    # # Append instead of overwrite
+    csv_file = "/BS/disentanglement/work/Disentanglement/MSAE/results_ms_score.csv"
+    df.to_csv(csv_file, mode="a", index=False, header=not os.path.exists(csv_file))
+    
+    # print(results)
 
 
 if __name__ == "__main__":

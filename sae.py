@@ -818,7 +818,7 @@ def load_model(path):
     
     # Create and load the model
     model = Autoencoder(n_latents, n_inputs, activation, tied=tied, normalize=normalize, latent_soft_cap=latent_soft_cap)
-    model_state_dict = torch.load(path, map_location='cuda' if torch.cuda.is_available() else 'cpu')
+    model_state_dict = torch.load(path, map_location='cuda' if torch.cuda.is_available() else 'cpu', weights_only=False)
     model.load_state_dict(model_state_dict['model'])
     mean_center = model_state_dict['mean_center']
     scaling_factor = model_state_dict['scaling_factor']
@@ -944,3 +944,385 @@ class SAE(nn.Module):
         
         # Return reconstructed, post_reconstructed, full_latents
         return post_reconstructed, reconstructed, full_latents
+
+
+"""
+BCOS Sparse Autoencoder Implementation
+
+Extends the sparse autoencoder framework with B-cos transforms for improved
+interpretability through cosine similarity-based representations.
+"""
+
+from typing import Callable, Any
+import warnings
+
+import torch
+import torch.nn as nn
+import torch.linalg as LA
+import torch.nn.functional as F
+
+from utils import normalize_data, JumpReLUFunction, StepFunction
+
+
+class NormedLinear(nn.Linear):
+    """
+    Standard linear transform, but with unit norm weights.
+    """
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        w = self.weight / LA.vector_norm(self.weight, dim=1, keepdim=True)
+        return F.linear(input, w, self.bias)
+
+
+class BcosLinear(nn.Module):
+    """
+    BcosLinear is a linear transform with unit norm weights and a cosine similarity
+    activation function.
+
+    Parameters
+    ----------
+    in_features : int
+        Number of input features
+    out_features : int
+        Number of output features
+    bias : bool
+        This is ignored. BcosLinear does not support bias.
+    b : int | float
+        The base of the exponential used to scale the cosine similarity.
+    max_out : int
+        The number of output vectors to use.
+    """
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        b: float = 2,
+        max_out: int = 1,
+    ) -> None:
+        assert not bias, "BcosLinear does not support bias"
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.bias = False
+        self.b = b
+        self.max_out = max_out
+        self.detach = False
+
+        self.linear = NormedLinear(
+            in_features,
+            out_features * self.max_out,
+            bias=False,
+        )
+
+    def forward(self, in_tensor: torch.Tensor) -> torch.Tensor:
+        """Forward pass with B-cos transform."""
+        # Simple linear layer with normalized weights
+        out = self.linear(in_tensor)
+
+        # MaxOut computation
+        if self.max_out > 1:
+            M = self.max_out
+            O = self.out_features
+            out = out.unflatten(dim=-1, sizes=(O, M))
+            out = out.max(dim=-1, keepdim=False).values
+
+        # if B=1, no further calculation necessary
+        if self.b == 1:
+            return out
+
+        # Calculating the norm of input vectors ||x||
+        norm = LA.vector_norm(in_tensor, dim=-1, keepdim=True) + 1e-12
+
+        # Calculate the dynamic scale (|cos|^(B-1))
+        maybe_detached_out = out
+        if self.detach:
+            maybe_detached_out = out.detach()
+            norm = norm.detach()
+
+        if self.b == 2:
+            dynamic_scaling = maybe_detached_out.abs() / norm
+        else:
+            abs_cos = (maybe_detached_out / norm).abs() + 1e-6
+            dynamic_scaling = abs_cos.pow(self.b - 1)
+
+        # put everything together
+        out = dynamic_scaling * out  # |cos|^(B-1) (ŵ·x)
+        return out
+
+
+class BcosAutoencoder(nn.Module):
+    """
+    B-cos Sparse Autoencoder.
+    
+    Uses B-cos linear transforms for both encoder and decoder, providing
+    interpretable cosine similarity-based representations.
+    
+    Architecture:
+        latents = activation(bcos_encoder(x - pre_bias) + latent_bias)
+        recons = bcos_decoder(latents) + pre_bias
+    
+    Attributes:
+        n_latents (int): Number of latent features
+        n_inputs (int): Dimensionality of input data
+        tied (bool): Whether decoder weights are tied to encoder weights
+        normalize (bool): Whether to normalize input data
+        b (float): B-cos exponent parameter
+        bcos_encoder (BcosLinear): B-cos encoder layer
+        bcos_decoder (BcosLinear): B-cos decoder layer (if not tied)
+        pre_bias (nn.Parameter): Input bias/offset
+        latent_bias (nn.Parameter): Latent bias
+        activation (nn.Module): Activation function for latent layer
+    """
+    def __init__(
+        self,
+        n_latents: int,
+        n_inputs: int,
+        activation: Callable = nn.ReLU(),
+        tied: bool = False,
+        normalize: bool = False,
+        bias_init: torch.Tensor | float = 0.0,
+        b: float = 2,
+        max_out: int = 1,
+        latent_soft_cap: float = 30.0,
+        *args,
+        **kwargs
+    ) -> None:
+        """
+        Initialize the B-cos sparse autoencoder.
+        
+        Args:
+            n_latents: Dimension of latent space
+            n_inputs: Dimensionality of input data
+            activation: Activation function or name
+            tied: Whether to tie encoder and decoder weights
+            normalize: Whether to normalize input data
+            bias_init: Initial bias value
+            b: B-cos exponent parameter (typically 2)
+            max_out: Number of max_out units for B-cos layers
+            latent_soft_cap: Soft cap value for latent activations
+        """
+        super().__init__()
+        
+        # Import activation helper if string is passed
+        if isinstance(activation, str):
+            from autoencoder import get_activation
+            activation = get_activation(activation)
+        
+        # Store configuration
+        self.tied = tied
+        self.n_latents = n_latents
+        self.n_inputs = n_inputs
+        self.normalize = normalize
+        self.b = b
+        self.max_out = max_out
+        
+        # Initialize biases
+        self.pre_bias = nn.Parameter(
+            torch.full((n_inputs,), bias_init) if isinstance(bias_init, float) else bias_init
+        )
+        self.latent_bias = nn.Parameter(torch.zeros(n_latents,))
+        
+        # Initialize B-cos encoder
+        self.bcos_encoder = BcosLinear(
+            in_features=n_inputs,
+            out_features=n_latents,
+            bias=False,
+            b=b,
+            max_out=max_out,
+        )
+        
+        # Initialize B-cos decoder (if not tied)
+        if tied:
+            self.bcos_decoder = None
+        else:
+            self.bcos_decoder = BcosLinear(
+                in_features=n_latents,
+                out_features=n_inputs,
+                bias=False,
+                b=b,
+                max_out=max_out,
+            )
+        
+        # Set up activation functions
+        from autoencoder import SoftCapping
+        self.latent_soft_cap = SoftCapping(latent_soft_cap) if latent_soft_cap > 0 else nn.Identity()
+        self.activation = activation
+        
+        # Set up activation tracking
+        self.latents_activation_frequency: torch.Tensor
+        self.register_buffer(
+            "latents_activation_frequency", torch.zeros(n_latents, dtype=torch.int64, requires_grad=False)
+        )
+        self.num_updates = 0
+
+    def get_and_reset_stats(self) -> torch.Tensor:
+        """Get activation statistics and reset counters."""
+        activations = self.latents_activation_frequency.detach().cpu().float() / max(self.num_updates, 1)
+        self.latents_activation_frequency.zero_()
+        self.num_updates = 0
+        return activations
+
+    def encode_pre_act(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Compute pre-activation latent values using B-cos encoder.
+        
+        Args:
+            x: Input data [batch, n_inputs]
+        
+        Returns:
+            Pre-activation latent values [batch, n_latents]
+        """
+        x = x - self.pre_bias
+        latents_pre_act = self.bcos_encoder(x) + self.latent_bias
+        return latents_pre_act
+
+    def preprocess(self, x: torch.Tensor) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Preprocess input data, optionally normalizing it."""
+        if not self.normalize:
+            return x, dict()
+        x_processed, mu, std = normalize_data(x)
+        return x_processed, dict(mu=mu, std=std)
+
+    def encode(
+        self, 
+        x: torch.Tensor, 
+        topk_number: int | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """
+        Encode input data to latent representations.
+        
+        Args:
+            x: Input data [batch, n_inputs]
+            topk_number: Number of top-k activations to keep (optional)
+        
+        Returns:
+            tuple: (encoded, full_encoded, info)
+        """
+        x, info = self.preprocess(x)
+        pre_encoded = self.encode_pre_act(x)
+        encoded = self.activation(pre_encoded)
+        
+        # Get full activations for analysis
+        from autoencoder import TopK
+        if isinstance(self.activation, TopK):
+            full_encoded = self.activation.forward_eval(pre_encoded)
+        else:
+            full_encoded = torch.clone(encoded)
+        
+        # Apply topk filtering for inference if requested
+        if topk_number is not None:
+            _, indices = torch.topk(full_encoded, k=topk_number, dim=-1)
+            values = torch.gather(full_encoded, -1, indices)
+            full_encoded = torch.zeros_like(full_encoded)
+            full_encoded.scatter_(-1, indices, values)
+        
+        # Apply soft capping
+        caped_encoded = self.latent_soft_cap(encoded)
+        capped_full_encoded = self.latent_soft_cap(full_encoded)
+        
+        return caped_encoded, capped_full_encoded, info
+
+    def decode(self, latents: torch.Tensor, info: dict[str, Any] | None = None) -> torch.Tensor:
+        """
+        Decode latent representations using B-cos decoder.
+        
+        Args:
+            latents: Latent activations [batch, n_latents]
+            info: Normalization information
+        
+        Returns:
+            Reconstructed input data [batch, n_inputs]
+        """
+        # Decode using tied or untied B-cos weights
+        if self.tied:
+            # For tied weights, use transposed encoder
+            # Create a temporary decoder with transposed weights
+            ret = F.linear(latents, self.bcos_encoder.linear.weight.t())
+            # Apply B-cos transform manually if needed
+            if self.b != 1:
+                norm = LA.vector_norm(latents, dim=-1, keepdim=True) + 1e-12
+                if self.b == 2:
+                    dynamic_scaling = ret.abs() / norm
+                else:
+                    abs_cos = (ret / norm).abs() + 1e-6
+                    dynamic_scaling = abs_cos.pow(self.b - 1)
+                ret = dynamic_scaling * ret
+        else:
+            ret = self.bcos_decoder(latents)
+        
+        ret = ret + self.pre_bias
+        
+        # Denormalize if needed
+        if self.normalize:
+            assert info is not None
+            ret = ret * info["std"] + info["mu"]
+        
+        return ret
+
+    @torch.no_grad()
+    def update_latent_statistics(self, latents: torch.Tensor) -> None:
+        """Update statistics on latent activations."""
+        self.num_updates += latents.shape[0]
+        current_activation_frequency = (latents != 0).to(torch.int64).sum(dim=0)
+        self.latents_activation_frequency += current_activation_frequency
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Forward pass through the B-cos autoencoder.
+        
+        Args:
+            x: Input data [batch, n_inputs]
+        
+        Returns:
+            tuple: (recons, latents, all_recons, all_latents)
+        """
+        # Preprocess data
+        x_processed, info = self.preprocess(x)
+        
+        # Compute pre-activations
+        latents_pre_act = self.encode_pre_act(x_processed)
+        
+        # Apply activation function
+        latents = self.activation(latents_pre_act)
+        latents_caped = self.latent_soft_cap(latents)
+
+        # Decode to reconstruction
+        recons = self.decode(latents_caped, info)
+        
+        # Update activation statistics
+        self.update_latent_statistics(latents_caped)
+        
+        # Handle different activation function types
+        from autoencoder import TopK, JumpReLU
+        if isinstance(self.activation, TopK):
+            all_latents = self.activation.forward_eval(latents_pre_act)
+            all_latents_caped = self.latent_soft_cap(all_latents)
+            all_recons = self.decode(all_latents_caped, info)
+            return recons, latents_caped, all_recons, all_latents_caped
+        elif isinstance(self.activation, JumpReLU) and self.training:
+            loss_latents = self.activation.forward_train(latents)
+            return recons, loss_latents, recons, latents_caped
+        else:
+            return recons, latents_caped, recons, latents_caped
+
+    @torch.no_grad()
+    def scale_to_unit_norm(self) -> None:
+        """
+        Scale decoder to unit norm (B-cos weights are already normalized).
+        This method is kept for API compatibility but B-cos layers maintain
+        their own normalization.
+        """
+        # B-cos layers already normalize their weights
+        # This is a no-op for compatibility with standard autoencoder interface
+        pass
+
+    @torch.no_grad()
+    def project_grads_decode(self):
+        """
+        Project decoder gradients (adapted for B-cos).
+        B-cos layers handle their own gradient constraints through normalization.
+        """
+        # B-cos layers maintain unit norm through their forward pass
+        # Gradient projection is handled implicitly
+        pass
+
