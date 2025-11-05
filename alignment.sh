@@ -88,107 +88,107 @@ STORE_DIR="/BS/disentanglement/work/msae/extract_embeddings"
 # echo "ResNet50 SAE evaluated"
 
 ## DINOv2
-SAE="dinov2_vitl14"
-SAE="/BS/disentanglement/work/msae/8192_1024_ReLU_003_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-SAE2="/BS/disentanglement/work/msae2/8192_1024_ReLU_003_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
+# SAE="dinov2_vitl14"
+# SAE="/BS/disentanglement/work/msae/8192_1024_ReLU_003_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# SAE2="/BS/disentanglement/work/msae2/8192_1024_ReLU_003_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
 
-SAE="/BS/disentanglement/work/msae/16384_1024_ReLU_003_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-SAE2="/BS/disentanglement/work/msae2/16384_1024_ReLU_003_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
+# SAE="/BS/disentanglement/work/msae/16384_1024_ReLU_003_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# SAE2="/BS/disentanglement/work/msae2/16384_1024_ReLU_003_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
 
-SAE="/BS/disentanglement/work/msae/32768_1024_ReLU_003_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-SAE2="/BS/disentanglement/work/msae2/32768_1024_ReLU_003_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
+# SAE="/BS/disentanglement/work/msae/32768_1024_ReLU_003_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# SAE2="/BS/disentanglement/work/msae2/32768_1024_ReLU_003_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
 
-SAE="/BS/disentanglement/work/msae/8192_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-SAE2="/BS/disentanglement/work/msae2/8192_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
+# SAE="/BS/disentanglement/work/msae/8192_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# SAE2="/BS/disentanglement/work/msae2/8192_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
 
-SAE="/BS/disentanglement/work/msae/16384_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-SAE2="/BS/disentanglement/work/msae2/16384_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
+# SAE="/BS/disentanglement/work/msae/16384_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# SAE2="/BS/disentanglement/work/msae2/16384_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
 
-SAE="/BS/disentanglement/work/msae/32768_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-SAE2="/BS/disentanglement/work/msae2/32768_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
-
-
-SAE="/BS/disentanglement/work/msae/8192_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-SAE2="/BS/disentanglement/work/msae2/8192_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
-
-SAE="/BS/disentanglement/work/msae/16384_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-SAE2="/BS/disentanglement/work/msae2/16384_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
-
-SAE="/BS/disentanglement/work/msae/32768_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-SAE2="/BS/disentanglement/work/msae2/32768_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
+# SAE="/BS/disentanglement/work/msae/32768_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# SAE2="/BS/disentanglement/work/msae2/32768_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
 
 
-#BatchTop64
-SAE="/BS/disentanglement/work/msae/batchtopk/16384_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-SAE2="/BS/disentanglement/work/msae2/batchtopk/16384_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
+# SAE="/BS/disentanglement/work/msae/8192_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# SAE2="/BS/disentanglement/work/msae2/8192_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
+
+# SAE="/BS/disentanglement/work/msae/16384_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# SAE2="/BS/disentanglement/work/msae2/16384_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
+
+# SAE="/BS/disentanglement/work/msae/32768_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# SAE2="/BS/disentanglement/work/msae2/32768_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
 
 
-SAE="/BS/disentanglement/work/msae/batchtopk/32768_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-SAE2="/BS/disentanglement/work/msae2/batchtopk/32768_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
+# #BatchTop64
+# SAE="/BS/disentanglement/work/msae/batchtopk/16384_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# SAE2="/BS/disentanglement/work/msae2/batchtopk/16384_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
 
 
-SAE="/BS/disentanglement/work/msae/batchtopk/8192_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-SAE2="/BS/disentanglement/work/msae2/batchtopk/8192_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
+# SAE="/BS/disentanglement/work/msae/batchtopk/32768_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# SAE2="/BS/disentanglement/work/msae2/batchtopk/32768_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
 
 
-#BatchTop256
-SAE="/BS/disentanglement/work/msae/batchtopk/16384_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-SAE2="/BS/disentanglement/work/msae2/batchtopk/16384_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
+# SAE="/BS/disentanglement/work/msae/batchtopk/8192_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# SAE2="/BS/disentanglement/work/msae2/batchtopk/8192_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
 
 
-SAE="/BS/disentanglement/work/msae/batchtopk/32768_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-SAE2="/BS/disentanglement/work/msae2/batchtopk/32768_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
+# #BatchTop256
+# SAE="/BS/disentanglement/work/msae/batchtopk/16384_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# SAE2="/BS/disentanglement/work/msae2/batchtopk/16384_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
 
 
-SAE="/BS/disentanglement/work/msae/batchtopk/8192_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-SAE2="/BS/disentanglement/work/msae2/batchtopk/8192_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
+# SAE="/BS/disentanglement/work/msae/batchtopk/32768_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# SAE2="/BS/disentanglement/work/msae2/batchtopk/32768_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
 
 
-#MSAE RW
-SAE="/BS/disentanglement/work/msae/16384_1024_TopKReLU_64_RW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-SAE2="/BS/disentanglement/work/msae2/16384_1024_TopKReLU_64_RW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
+# SAE="/BS/disentanglement/work/msae/batchtopk/8192_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# SAE2="/BS/disentanglement/work/msae2/batchtopk/8192_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
 
 
-SAE="/BS/disentanglement/work/msae/32768_1024_TopKReLU_64_RW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-SAE2="/BS/disentanglement/work/msae2/32768_1024_TopKReLU_64_RW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
+# #MSAE RW
+# SAE="/BS/disentanglement/work/msae/16384_1024_TopKReLU_64_RW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# SAE2="/BS/disentanglement/work/msae2/16384_1024_TopKReLU_64_RW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
 
 
-SAE="/BS/disentanglement/work/msae/8192_1024_TopKReLU_64_RW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-SAE2="/BS/disentanglement/work/msae2/8192_1024_TopKReLU_64_RW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
+# SAE="/BS/disentanglement/work/msae/32768_1024_TopKReLU_64_RW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# SAE2="/BS/disentanglement/work/msae2/32768_1024_TopKReLU_64_RW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
 
 
-#MSAE UW
+# SAE="/BS/disentanglement/work/msae/8192_1024_TopKReLU_64_RW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# SAE2="/BS/disentanglement/work/msae2/8192_1024_TopKReLU_64_RW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
+
+
+# #MSAE UW
 SAE="/BS/disentanglement/work/msae/16384_1024_TopKReLU_64_UW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-SAE2="/BS/disentanglement/work/msae2/16384_2048_TopKReLU_64_UW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+SAE2="/BS/disentanglement/work/msae2/16384_1024_TopKReLU_64_UW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
 uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
 
 
-SAE="/BS/disentanglement/work/msae/32768_1024_TopKReLU_64_UW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-SAE2="/BS/disentanglement/work/msae2/32768_1024_TopKReLU_64_UW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
+# SAE="/BS/disentanglement/work/msae/32768_1024_TopKReLU_64_UW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# SAE2="/BS/disentanglement/work/msae2/32768_1024_TopKReLU_64_UW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
 
 
-SAE="/BS/disentanglement/work/msae/8192_1024_TopKReLU_64_UW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-SAE2="/BS/disentanglement/work/msae2/8192_1024_TopKReLU_64_UW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
+# SAE="/BS/disentanglement/work/msae/8192_1024_TopKReLU_64_UW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# SAE2="/BS/disentanglement/work/msae2/8192_1024_TopKReLU_64_UW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/aligment_metric.py --sae_1 $SAE --sae_2 $SAE2
 
 
 

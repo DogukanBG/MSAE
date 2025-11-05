@@ -1,6 +1,6 @@
 #!/bin/sh
 #SBATCH -p gpu16
-#SBATCH -t 12:00:00
+#SBATCH -t 1:00:00
 #SBATCH -o /BS/disentanglement/work/Disentanglement/jobs/sae_training/sae_eval-%j.out
 #SBATCH --gres gpu:a40:1
 
@@ -61,7 +61,7 @@ DATASET="/BS/disentanglement/work/sae/imagenet_dinov2_vitl14_embeddings_val.npy"
 # MODEL="/BS/disentanglement/work/msae/batchtopk/32768_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
-#MSAE RW
+# #MSAE RW
 MODEL="/BS/disentanglement/work/msae/8192_1024_TopKReLU_64_RW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
 uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
@@ -71,7 +71,7 @@ uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -
 MODEL="/BS/disentanglement/work/msae/32768_1024_TopKReLU_64_RW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
 uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
-#MSAE UW
+# #MSAE UW
 MODEL="/BS/disentanglement/work/msae/8192_1024_TopKReLU_64_UW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
 uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
@@ -81,7 +81,7 @@ uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -
 MODEL="/BS/disentanglement/work/msae/32768_1024_TopKReLU_64_UW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
 uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
-echo "DINOv2 evaluated"
+# echo "DINOv2 evaluated"
 
 # ##ViTB16
 # DATASET="/BS/disentanglement/work/sae/imagenet_vit_b_16_embeddings_val.npy"
@@ -158,43 +158,43 @@ echo "DINOv2 evaluated"
 # echo "ViT-b/16 evaluated"
 
 # ##ResNet50
-# DATASET="/BS/disentanglement/work/sae/imagenet_resnet50_embeddings_val.npy"
-# #ReLU
-# MODEL="/BS/disentanglement/work/msae/16384_2048_ReLU_003_False_False_0.0_imagenet_resnet50_embeddings.pth"
-# uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
+DATASET="/BS/disentanglement/work/sae/imagenet_resnet50_embeddings_val.npy"
+# # #ReLU
+# # MODEL="/BS/disentanglement/work/msae/16384_2048_ReLU_003_False_False_0.0_imagenet_resnet50_embeddings.pth"
+# # uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
-# MODEL="/BS/disentanglement/work/msae/32768_2048_ReLU_003_False_False_0.0_imagenet_resnet50_embeddings.pth"
-# uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
+# # MODEL="/BS/disentanglement/work/msae/32768_2048_ReLU_003_False_False_0.0_imagenet_resnet50_embeddings.pth"
+# # uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
 # MODEL="/BS/disentanglement/work/msae/65536_2048_ReLU_003_False_False_0.0_imagenet_resnet50_embeddings.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
-# # #Top64
-# MODEL="/BS/disentanglement/work/msae/16384_2048_TopKReLU_64_False_False_0.0_imagenet_resnet50_embeddings.pth"
-# uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
+# # # #Top64
+# # MODEL="/BS/disentanglement/work/msae/16384_2048_TopKReLU_64_False_False_0.0_imagenet_resnet50_embeddings.pth"
+# # uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
-# MODEL="/BS/disentanglement/work/msae/32768_2048_TopKReLU_64_False_False_0.0_imagenet_resnet50_embeddings.pth"
-# uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
+# # MODEL="/BS/disentanglement/work/msae/32768_2048_TopKReLU_64_False_False_0.0_imagenet_resnet50_embeddings.pth"
+# # uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
 # MODEL="/BS/disentanglement/work/msae/65536_2048_TopKReLU_64_False_False_0.0_imagenet_resnet50_embeddings.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
-# #Top256
-# MODEL="/BS/disentanglement/work/msae/16384_2048_TopKReLU_256_False_False_0.0_imagenet_resnet50_embeddings.pth"
-# uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
+# # #Top256
+# # MODEL="/BS/disentanglement/work/msae/16384_2048_TopKReLU_256_False_False_0.0_imagenet_resnet50_embeddings.pth"
+# # uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
-# MODEL="/BS/disentanglement/work/msae/32768_2048_TopKReLU_256_False_False_0.0_imagenet_resnet50_embeddings.pth"
-# uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
+# # MODEL="/BS/disentanglement/work/msae/32768_2048_TopKReLU_256_False_False_0.0_imagenet_resnet50_embeddings.pth"
+# # uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
 # MODEL="/BS/disentanglement/work/msae/65536_2048_TopKReLU_256_False_False_0.0_imagenet_resnet50_embeddings.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
-# #BatchTop64
-# MODEL="/BS/disentanglement/work/msae/batchtopk/16384_2048_TopKReLU_64_False_False_0.0_imagenet_resnet50_embeddings.pth"
-# uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
+# # #BatchTop64
+# # MODEL="/BS/disentanglement/work/msae/batchtopk/16384_2048_TopKReLU_64_False_False_0.0_imagenet_resnet50_embeddings.pth"
+# # uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
-# MODEL="/BS/disentanglement/work/msae/batchtopk/32768_2048_TopKReLU_64_False_False_0.0_imagenet_resnet50_embeddings.pth"
-# uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
+# # MODEL="/BS/disentanglement/work/msae/batchtopk/32768_2048_TopKReLU_64_False_False_0.0_imagenet_resnet50_embeddings.pth"
+# # uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
 # MODEL="/BS/disentanglement/work/msae/batchtopk/65536_2048_TopKReLU_64_False_False_0.0_imagenet_resnet50_embeddings.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
@@ -206,27 +206,27 @@ echo "DINOv2 evaluated"
 # MODEL="/BS/disentanglement/work/msae/batchtopk/32768_2048_TopKReLU_256_False_False_0.0_imagenet_resnet50_embeddings.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
-# MODEL="/BS/disentanglement/work/msae/batchtopk/65536_2048_TopKReLU_256_False_False_0.0_imagenet_resnet50_embeddings.pth"
+# MODEL="/BS/disentanglement/work/msae/batchtopk/8192_2048_TopKReLU_256_False_False_0.0_imagenet_resnet50_embeddings.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
-#MSAE RW
+# #MSAE RW
 # MODEL="/BS/disentanglement/work/msae/16384_2048_TopKReLU_64_RW_False_False_0.0_imagenet_resnet50_embeddings.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
 # MODEL="/BS/disentanglement/work/msae/32768_2048_TopKReLU_64_RW_False_False_0.0_imagenet_resnet50_embeddings.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
-# MODEL="/BS/disentanglement/work/msae/65536_2048_TopKReLU_64_RW_False_False_0.0_imagenet_resnet50_embeddings.pth"
+# MODEL="/BS/disentanglement/work/msae/8192_2048_TopKReLU_64_RW_False_False_0.0_imagenet_resnet50_embeddings.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
-# #MSAE UW
+# # #MSAE UW
 # MODEL="/BS/disentanglement/work/msae/16384_2048_TopKReLU_64_UW_False_False_0.0_imagenet_resnet50_embeddings.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
 # MODEL="/BS/disentanglement/work/msae/32768_2048_TopKReLU_64_UW_False_False_0.0_imagenet_resnet50_embeddings.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
-# MODEL="/BS/disentanglement/work/msae/65536_2048_TopKReLU_64_UW_False_False_0.0_imagenet_resnet50_embeddings.pth"
+# MODEL="/BS/disentanglement/work/msae/8192_2048_TopKReLU_64_UW_False_False_0.0_imagenet_resnet50_embeddings.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/extract_sae_embeddings.py -m $MODEL -d $DATASET -o $STORE_DIR
 
 

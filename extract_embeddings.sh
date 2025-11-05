@@ -1,6 +1,6 @@
 #!/bin/sh
-#SBATCH -p gpu16
-#SBATCH -t 16:00:00
+#SBATCH -p gpu20
+#SBATCH -t 2:00:00
 #SBATCH -o /BS/disentanglement/work/Disentanglement/jobs/sae_jobs/MSAE-eval_sae-%j.out
 #SBATCH --gres gpu:1
 

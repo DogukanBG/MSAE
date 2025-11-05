@@ -1,9 +1,9 @@
 #!/bin/bash
-#SBATCH -p gpu22
+#SBATCH -p gpu24
 #SBATCH -t 12:00:00
 #SBATCH -o /BS/disentanglement/work/Disentanglement/jobs/ms_scores/vit_n%a.out
 #SBATCH --gres gpu:1
-#SBATCH --array=21-36%7
+#SBATCH --array=26-28%10
 
 
 # Define all model-dataset combinations

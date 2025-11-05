@@ -1,8 +1,8 @@
 #!/bin/sh
-#SBATCH -p gpu16
-#SBATCH -t 01:00:00
+#SBATCH -p gpu22
+#SBATCH -t 23:59:00
 #SBATCH -o /BS/disentanglement/work/Disentanglement/jobs/hc/hc_eval-%j.out
-#SBATCH --gres gpu:1
+#SBATCH --gres gpu:a100:1
 
 DATA_DIR="/scratch/inf0/user/mparcham/ILSVRC2012/train"
 DATASET="imagenet"

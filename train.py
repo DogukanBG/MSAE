@@ -240,6 +240,7 @@ def main(args):
     cfg = get_config(args.model)
     cfg.training.epochs = args.epochs
     cfg.training.batch_size = args.batch_size
+    cfg.training.num_workers = 4
     ##cfg.training.mean_center=True#cfg.training.mean_center, 
     ##cfg.training.target_norm=None#cfg.training.target_norm,
     
@@ -729,9 +730,9 @@ def main(args):
     model_params = f"{cfg.model.n_latents}_{cfg.model.n_inputs}_{activation}{model_appendix}_{cfg.model.tied}_{cfg.model.normalize}_{cfg.model.latent_soft_cap}"
     dataset_name = args.dataset_train.split("/")[-1].split(".")[0]
     if "BatchTopK" in args.model:
-        save_path = f"/BS/disentanglement/work/msae2/batchtopk/{model_params}_{dataset_name}.pth"
+        save_path = f"/BS/disentanglement/work/msae/batchtopk/{model_params}_{dataset_name}.pth"
     else:
-        save_path = f"/BS/disentanglement/work/msae2/{model_params}_{dataset_name}.pth"
+        save_path = f"/BS/disentanglement/work/msae/{model_params}_{dataset_name}.pth"
     
     # Save model state and preprocessing parameters
     checkpoint = {
@@ -1035,15 +1036,783 @@ def get_layer_by_path(model, path):
 
 import gc
 
+import torch
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+import numpy as np
+from pathlib import Path
+from tqdm import tqdm
+import pickle
+from sklearn.metrics import pairwise_distances
+import clip
+from PIL import Image
+import json
+
+
+class PatchDataset(Dataset):
+    """Dataset of image patches extracted from ImageNet validation set."""
+    
+    def __init__(self, patches, transform=None):
+        self.patches = patches
+        self.transform = transform
+    
+    def __len__(self):
+        return len(self.patches)
+    
+    def __getitem__(self, idx):
+        patch = self.patches[idx]
+        if self.transform:
+            patch = self.transform(patch)
+        return patch
+
+
+def get_layer_by_path(model, layer_path):
+    """Get layer from model using dot-notation path."""
+    parts = layer_path.split('.')
+    layer = model
+    for part in parts:
+        layer = getattr(layer, part)
+    return layer
+
+
+def extract_patches_from_imagenet(val_loader, patch_size=16, save_dir=None, device='cuda'):
+    """
+    Extract all patches from ImageNet validation dataset.
+    This is model-independent and only needs to be computed once.
+    
+    Args:
+        val_loader: DataLoader for ImageNet validation set
+        patch_size: Size of square patches to extract
+        save_dir: Directory to save/load patches from
+        device: Device to use for processing
+    
+    Returns:
+        patches: List of PIL Images (patches)
+        metadata: Dict with patch metadata (original image idx, position)
+    """
+    if save_dir is not None:
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        patch_file = save_dir / f"imagenet_patches_size{patch_size}.pkl"
+        
+        # Load if exists
+        if patch_file.exists():
+            print(f"Loading cached patches from {patch_file}")
+            with open(patch_file, 'rb') as f:
+                data = pickle.load(f)
+            return data['patches'], data['metadata']
+    
+    print("Extracting patches from ImageNet validation set...")
+    all_patches = []
+    all_metadata = []
+    
+    for img_idx, (images, _) in enumerate(tqdm(val_loader, desc="Extracting patches")):
+        batch_size = images.size(0)
+        
+        for b in range(batch_size):
+            img = images[b]  # (C, H, W)
+            _, H, W = img.shape
+            
+            # Calculate number of patches
+            num_patches_h = H // patch_size
+            num_patches_w = W // patch_size
+            
+            # Extract patches
+            for i in range(num_patches_h):
+                for j in range(num_patches_w):
+                    h_start = i * patch_size
+                    w_start = j * patch_size
+                    patch = img[:, h_start:h_start+patch_size, w_start:w_start+patch_size]
+                    
+                    # Convert to PIL Image for saving/loading
+                    patch_pil = transforms.ToPILImage()(patch)
+                    all_patches.append(patch_pil)
+                    
+                    all_metadata.append({
+                        'img_idx': img_idx * batch_size + b,
+                        'position': (i, j),
+                        'patch_idx': len(all_patches) - 1
+                    })
+    
+    metadata = {
+        'patch_size': patch_size,
+        'num_patches': len(all_patches),
+        'metadata': all_metadata
+    }
+    
+    # Save if directory provided
+    if save_dir is not None:
+        print(f"Saving patches to {patch_file}")
+        with open(patch_file, 'wb') as f:
+            pickle.dump({'patches': all_patches, 'metadata': metadata}, f)
+    
+    return all_patches, metadata
+
+def extract_patch_activations(model, patches, patch_metadata, target_layer, experiment_name,
+                              batch_size=256, device='cuda', sae=None):
+    """
+    Extract activations for all patches through the target layer.
+    Returns path to memmap file instead of loading all activations.
+    
+    Returns:
+        mmap_info: Dict with {'path': mmap_file, 'shape': (num_patches, num_neurons), 'dtype': 'float32'}
+    """
+    # Create dataset and dataloader
+    transform = transforms.Compose([
+        transforms.Resize(224),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                           std=[0.229, 0.224, 0.225])
+    ])
+    
+    patch_dataset = PatchDataset(patches, transform=transform)
+    patch_loader = DataLoader(patch_dataset, batch_size=batch_size, 
+                             shuffle=False, num_workers=4, pin_memory=True)
+    
+    # Setup hook
+    activations_dict = {}
+    def hook_fn(module, input, output):
+        activations_dict["output"] = output.detach()
+    
+    layer = get_layer_by_path(model, target_layer)
+    hook_handle = layer.register_forward_hook(hook_fn)
+    
+    model = model.to(device)
+    model.eval()
+    
+    if sae is not None:
+        sae = sae.to(device)
+        sae.eval()
+    
+    # First pass to determine output shape
+    first_batch = next(iter(patch_loader)).to(device)
+    with torch.no_grad():
+        _ = model(first_batch)
+        latent_acts = activations_dict["output"]
+        
+        if latent_acts.dim() == 4:
+            latent_acts = latent_acts.mean(dim=(2, 3))
+        elif latent_acts.dim() == 3:
+            latent_acts = latent_acts[:, 0, :]
+        
+        if sae is not None:
+            _, latent_acts, _, _ = sae(latent_acts)
+        
+        num_neurons = latent_acts.shape[1]
+    
+    # Create memory-mapped array
+    num_patches = len(patches)
+    mmap_file = f'/tmp/patch_activations_{experiment_name}.dat'
+    activations_mmap = np.memmap(mmap_file, dtype='float32', mode='w+', 
+                                  shape=(num_patches, num_neurons))
+    
+    current_idx = 0
+    
+    # Recreate dataloader (first batch was consumed)
+    patch_loader = DataLoader(patch_dataset, batch_size=batch_size, 
+                             shuffle=False, num_workers=4, pin_memory=True)
+    
+    with torch.no_grad():
+        for patch_batch in tqdm(patch_loader, desc="Computing patch activations"):
+            patch_batch = patch_batch.to(device)
+            
+            # Forward pass
+            _ = model(patch_batch)
+            latent_acts = activations_dict["output"]
+            
+            # Handle different activation shapes
+            if latent_acts.dim() == 4:
+                latent_acts = latent_acts.mean(dim=(2, 3))
+            elif latent_acts.dim() == 3:
+                latent_acts = latent_acts[:, 0, :]
+            
+            # Pass through SAE if provided
+            if sae is not None:
+                _, latent_acts, _, _ = sae(latent_acts)
+            
+            # Write directly to memmap
+            batch_size_actual = latent_acts.shape[0]
+            activations_mmap[current_idx:current_idx+batch_size_actual] = latent_acts.cpu().numpy()
+            current_idx += batch_size_actual
+            
+            # Free GPU memory
+            del latent_acts
+            if device == 'cuda':
+                torch.cuda.empty_cache()
+    
+    hook_handle.remove()
+    
+    # Flush to disk
+    activations_mmap.flush()
+    del activations_mmap
+    
+    # Return metadata instead of loading all data
+    return {
+        'path': mmap_file,
+        'shape': (num_patches, num_neurons),
+        'dtype': 'float32'
+    }
+
+
+def get_top_k_patches_per_neuron(mmap_info, patches, k=100, 
+                                save_dir=None, experiment_name="default"):
+    """
+    For each neuron, find the top-k most activating patches.
+    Memory-efficient version that processes one neuron at a time.
+    
+    Args:
+        mmap_info: Dict with memmap file info from extract_patch_activations
+        patches: List of PIL Image patches
+        k: Number of top patches to keep per neuron
+        save_dir: Directory to save top-k patches
+        experiment_name: Name of experiment for organizing files
+    
+    Returns:
+        top_k_patches_per_neuron: Dict mapping neuron_idx -> list of PIL Images
+    """
+    if save_dir is None:
+        save_dir = Path(f"/scratch/inf0/user/dbagci/pure/{experiment_name}")
+    else:
+        save_dir = Path(f"/scratch/inf0/user/dbagci/pure/{experiment_name}")
+    
+    save_dir.mkdir(parents=True, exist_ok=True)
+    top_k_file = save_dir / f"{experiment_name}_top_{k}_patches_per_neuron.pkl"
+    
+    # Load if exists
+    if top_k_file.exists():
+        print(f"Loading cached top-k patches from {top_k_file}")
+        with open(top_k_file, 'rb') as f:
+            return pickle.load(f)
+    
+    # Open memmap in read-only mode
+    num_patches, num_neurons = mmap_info['shape']
+    activations_mmap = np.memmap(mmap_info['path'], dtype=mmap_info['dtype'], 
+                                  mode='r', shape=mmap_info['shape'])
+    
+    print(f"Finding top-{k} patches per neuron...")
+    top_k_patches_per_neuron = {}
+    
+    # Process one neuron at a time - only loads one column into memory
+    for neuron_idx in tqdm(range(num_neurons), desc="Processing neurons"):
+        # Load activations for this neuron only (shape: num_patches)
+        neuron_activations = torch.from_numpy(activations_mmap[:, neuron_idx].copy())
+        
+        # Get top-k indices
+        top_k_indices = torch.topk(neuron_activations, k=min(k, num_patches)).indices
+        
+        # Collect corresponding patches
+        top_patches = [patches[idx] for idx in top_k_indices.numpy()]
+        top_k_patches_per_neuron[neuron_idx] = top_patches
+        
+        # Free memory
+        del neuron_activations
+    
+    # Clean up memmap
+    del activations_mmap
+    
+    # Save
+    print(f"Saving top-k patches to {top_k_file}")
+    with open(top_k_file, 'wb') as f:
+        pickle.dump(top_k_patches_per_neuron, f)
+    
+    return top_k_patches_per_neuron
+
+
+def compute_clip_embeddings(patches, device='cuda', batch_size=100):
+    """
+    Compute CLIP embeddings for a list of patches.
+    
+    Args:
+        patches: List of PIL Images
+        device: Device to use
+        batch_size: Batch size for CLIP encoding
+    
+    Returns:
+        embeddings: Tensor of shape (num_patches, clip_dim)
+    """
+    # Load CLIP model
+    clip_model, preprocess = clip.load("ViT-B/16", device=device)
+    clip_model.eval()
+    
+    all_embeddings = []
+    
+    with torch.no_grad():
+        for i in range(0, len(patches), batch_size):
+            batch_patches = patches[i:i+batch_size]
+            
+            # Preprocess patches
+            batch_tensors = torch.stack([preprocess(patch) for patch in batch_patches])
+            batch_tensors = batch_tensors.to(device)
+            
+            # Encode with CLIP
+            embeddings = clip_model.encode_image(batch_tensors)
+            embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)  # Normalize
+            
+            all_embeddings.append(embeddings.cpu())
+    
+    return torch.cat(all_embeddings, dim=0)
+
+
+def compute_clustering_metrics(embeddings, min_cluster_size=5, min_samples=3):
+    """
+    Cluster embeddings using K-Means and compute intra/inter-cluster distances.
+    
+    Args:
+        embeddings: Tensor of shape (num_samples, embedding_dim)
+        k: Number of clusters for K-Means (default: 3)
+    
+    Returns:
+        metrics: Dict with intra_cluster_dist, inter_cluster_dist, num_clusters, cluster_sizes
+    """
+    # Normalize embeddings to unit length
+    k = 3
+    embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
+    embeddings_np = embeddings.numpy()
+    
+    num_samples = embeddings_np.shape[0]
+    
+    # Check if we have enough samples
+    print("Embeddings Shape", embeddings_np.shape)
+    if num_samples < k:
+        return {
+            'intra_cluster_dist': None,
+            'inter_cluster_dist': None,
+            'num_clusters': 0,
+            'cluster_sizes': [],
+            'valid': False
+        }
+    
+    # Perform K-Means clustering
+    from sklearn.cluster import KMeans
+    
+    kmeans = KMeans(n_clusters=k, random_state=42)
+    cluster_labels = kmeans.fit_predict(embeddings_np)
+    cluster_centers = kmeans.cluster_centers_
+    
+    # Count samples in each cluster
+    unique_clusters, cluster_counts = np.unique(cluster_labels, return_counts=True)
+    num_clusters = len(unique_clusters)
+    
+    if num_clusters < 2:
+        # This shouldn't happen with K-Means, but check anyway
+        return {
+            'intra_cluster_dist': None,
+            'inter_cluster_dist': None,
+            'num_clusters': num_clusters,
+            'cluster_sizes': cluster_counts.tolist(),
+            'valid': False
+        }
+    
+    # Compute pairwise distances
+    distances = pairwise_distances(embeddings_np, metric='euclidean')
+    
+    # Compute intra-cluster distances (average distance within each cluster)
+    intra_cluster_dists = []
+    for cluster_id in unique_clusters:
+        cluster_mask = cluster_labels == cluster_id
+        cluster_indices = np.where(cluster_mask)[0]
+        
+        if len(cluster_indices) > 1:
+            # Get distances within this cluster
+            cluster_dists = distances[np.ix_(cluster_indices, cluster_indices)]
+            # Take upper triangle (excluding diagonal)
+            triu_indices = np.triu_indices_from(cluster_dists, k=1)
+            intra_dists = cluster_dists[triu_indices]
+            intra_cluster_dists.extend(intra_dists)
+    
+    avg_intra_cluster_dist = np.mean(intra_cluster_dists) if intra_cluster_dists else None
+    
+    # Compute inter-cluster distances (average distance between cluster centroids)
+    if len(cluster_centers) > 1:
+        centroid_distances = pairwise_distances(cluster_centers, metric='euclidean')
+        triu_indices = np.triu_indices_from(centroid_distances, k=1)
+        inter_cluster_dists = centroid_distances[triu_indices]
+        avg_inter_cluster_dist = np.mean(inter_cluster_dists)
+    else:
+        avg_inter_cluster_dist = None
+    
+    return {
+        'intra_cluster_dist': avg_intra_cluster_dist,
+        'inter_cluster_dist': avg_inter_cluster_dist,
+        'num_clusters': num_clusters,
+        'cluster_sizes': cluster_counts.tolist(),
+        'valid': True
+    }
+
+
+def compute_neuron_clustering_metric(
+    model,
+    target_layer,
+    val_loader,
+    k=100,
+    patch_size=64,
+    experiment_name="default",
+    save_dir=None,
+    device='cuda',
+    sae=None,
+    min_cluster_size=5,
+    min_samples=3,
+    recompute_patches=False,
+    recompute_activations=False
+):
+    """
+    Main function to compute the clustering metric for all neurons in a layer.
+    
+    Args:
+        model: Neural network model
+        target_layer: Layer path to analyze
+        val_loader: DataLoader for ImageNet validation set
+        k: Number of top activating patches per neuron
+        patch_size: Size of patches to extract
+        experiment_name: Name for organizing cached files
+        save_dir: Directory to save results
+        device: Device to use
+        sae: Optional SAE to pass activations through
+        min_cluster_size: HDBSCAN parameter
+        min_samples: HDBSCAN parameter
+        recompute_patches: Force recompute patches
+        recompute_activations: Force recompute activations
+    
+    Returns:
+        results: Dict with average metrics and per-neuron results
+    """
+    if save_dir is None:
+        save_dir = Path(f"/scratch/inf0/user/dbagci/pure/{experiment_name}")
+    else:
+        save_dir = Path(save_dir)
+    
+    save_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Step 1: Extract patches from ImageNet (model-independent)
+    patch_cache_dir = Path("/scratch/inf0/user/dbagci/pure") #save_dir / "patches"
+    if recompute_patches:
+        import shutil
+        if patch_cache_dir.exists():
+            shutil.rmtree(patch_cache_dir)
+    
+    patches, patch_metadata = extract_patches_from_imagenet(
+        val_loader, 
+        patch_size=patch_size, 
+        save_dir=patch_cache_dir,
+        device=device
+    )
+    
+    # Step 2: Extract activations for all patches (model-dependent)
+    activation_file = save_dir / f"{experiment_name}_patch_activations_{target_layer.replace('.', '_')}.pt"
+    
+    if recompute_activations or not activation_file.exists():
+        print("Computing patch activations...")
+        activations = extract_patch_activations(
+            model, patches, patch_metadata, target_layer,
+            device=device, sae=sae, experiment_name=experiment_name
+        )
+        torch.save(activations, activation_file)
+    else:
+        print(f"Loading cached activations from {activation_file}")
+        activations = torch.load(activation_file)
+    
+    # Step 3: Get top-k patches per neuron
+    top_k_patches = get_top_k_patches_per_neuron(
+        activations, patches, k=k, 
+        save_dir=save_dir, 
+        experiment_name=experiment_name
+    )
+    
+    # Step 4: For each neuron, compute CLIP embeddings and clustering metrics
+    print("Computing clustering metrics per neuron...")
+    num_neurons = len(top_k_patches)
+    
+    # Setup checkpointing
+    checkpoint_file = save_dir / f"{experiment_name}_neuron_analysis_checkpoint.pkl"
+    checkpoint_interval = 100  # Save every 100 neurons
+    
+    # Load existing checkpoint if available
+    if checkpoint_file.exists():
+        print(f"Loading checkpoint from {checkpoint_file}")
+        with open(checkpoint_file, 'rb') as f:
+            checkpoint = pickle.load(f)
+        per_neuron_results = checkpoint['per_neuron_results']
+        start_neuron = checkpoint['last_completed_neuron'] + 1
+        print(f"Resuming from neuron {start_neuron}/{num_neurons}")
+    else:
+        per_neuron_results = {}
+        start_neuron = 0
+    
+    valid_intra_dists = []
+    valid_inter_dists = []
+    
+    for neuron_idx in tqdm(range(start_neuron, num_neurons), desc="Analyzing neurons", initial=start_neuron, total=num_neurons):
+        neuron_patches = top_k_patches[neuron_idx]
+        
+        # Compute CLIP embeddings
+        embeddings = compute_clip_embeddings(neuron_patches, device=device)
+        
+        # Compute clustering metrics
+        metrics = compute_clustering_metrics(
+            embeddings, 
+            min_cluster_size=min_cluster_size,
+            min_samples=min_samples
+        )
+        
+        per_neuron_results[neuron_idx] = metrics
+        
+        # Save checkpoint periodically
+        if (neuron_idx + 1) % checkpoint_interval == 0:
+            checkpoint = {
+                'per_neuron_results': per_neuron_results,
+                'last_completed_neuron': neuron_idx,
+                'num_neurons': num_neurons
+            }
+            with open(checkpoint_file, 'wb') as f:
+                pickle.dump(checkpoint, f)
+            print(f"\nCheckpoint saved at neuron {neuron_idx + 1}/{num_neurons}")
+    
+    # Collect valid metrics for averaging (check all results, not just new ones)
+    for neuron_idx in range(num_neurons):
+        if neuron_idx in per_neuron_results:
+            metrics = per_neuron_results[neuron_idx]
+            if metrics['valid'] and metrics['intra_cluster_dist'] is not None:
+                valid_intra_dists.append(metrics['intra_cluster_dist'])
+            if metrics['valid'] and metrics['inter_cluster_dist'] is not None:
+                valid_inter_dists.append(metrics['inter_cluster_dist'])
+    
+    # Clean up checkpoint file after completion
+    if checkpoint_file.exists():
+        checkpoint_file.unlink()
+        print("Checkpoint file removed after successful completion")
+    
+    # Step 5: Compute averages
+    avg_intra_cluster_dist = np.mean(valid_intra_dists) if valid_intra_dists else None
+    avg_inter_cluster_dist = np.mean(valid_inter_dists) if valid_inter_dists else None
+    
+    # Compute ratio (higher is better - more separation between clusters)
+    if avg_intra_cluster_dist is not None and avg_inter_cluster_dist is not None:
+        separation_ratio = avg_inter_cluster_dist / avg_intra_cluster_dist
+    else:
+        separation_ratio = None
+    
+    results = {
+        'avg_intra_cluster_dist': avg_intra_cluster_dist,
+        'avg_inter_cluster_dist': avg_inter_cluster_dist,
+        'separation_ratio': separation_ratio,
+        'num_valid_neurons': len(valid_intra_dists),
+        'total_neurons': num_neurons,
+        'per_neuron_results': per_neuron_results
+    }
+    
+    # Save results
+    results_file = save_dir / f"{experiment_name}_clustering_metrics_{target_layer.replace('.', '_')}.json"
+    with open(results_file, 'w') as f:
+        # Convert to JSON-serializable format
+        json_results = {
+            'avg_intra_cluster_dist': float(avg_intra_cluster_dist) if avg_intra_cluster_dist else None,
+            'avg_inter_cluster_dist': float(avg_inter_cluster_dist) if avg_inter_cluster_dist else None,
+            'separation_ratio': float(separation_ratio) if separation_ratio else None,
+            'num_valid_neurons': len(valid_intra_dists),
+            'total_neurons': num_neurons,
+        }
+        json.dump(json_results, f, indent=2)
+    
+    print(f"\nResults saved to {results_file}")
+    print(f"\nAverage Intra-cluster Distance: {avg_intra_cluster_dist:.4f}" if avg_intra_cluster_dist else "N/A")
+    print(f"Average Inter-cluster Distance: {avg_inter_cluster_dist:.4f}" if avg_inter_cluster_dist else "N/A")
+    print(f"Separation Ratio: {separation_ratio:.4f}" if separation_ratio else "N/A")
+    print(f"Valid Neurons: {len(valid_intra_dists)}/{num_neurons}")
+    
+    return avg_intra_cluster_dist, avg_inter_cluster_dist, separation_ratio
+
+
+def compute_neuron_clustering_metric_optimized(
+    model,
+    target_layer,
+    val_loader,
+    k=100,
+    patch_size=64,
+    experiment_name="default",
+    save_dir=None,
+    device='cuda',
+    sae=None,
+    min_cluster_size=5,
+    min_samples=3,
+    recompute_patches=False,
+    recompute_activations=False,
+    clip_batch_size=200,  # Increased from 100 for better throughput
+    neurons_per_batch=50   # Process multiple neurons together
+):
+    """
+    Optimized version that loads CLIP once, batches neurons, and uses mixed precision.
+    """
+    if save_dir is None:
+        save_dir = Path(f"/scratch/inf0/user/dbagci/pure/{experiment_name}")
+    else:
+        save_dir = Path(save_dir)
+    
+    save_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Step 1: Extract patches from ImageNet (model-independent)
+    patch_cache_dir = Path("/scratch/inf0/user/dbagci/pure")
+    if recompute_patches:
+        import shutil
+        if patch_cache_dir.exists():
+            shutil.rmtree(patch_cache_dir)
+    
+    patches, patch_metadata = extract_patches_from_imagenet(
+        val_loader, 
+        patch_size=patch_size, 
+        save_dir=patch_cache_dir,
+        device=device
+    )
+    
+    # Step 2: Extract activations for all patches (model-dependent)
+    activation_file = save_dir / f"{experiment_name}_patch_activations_{target_layer.replace('.', '_')}.pt"
+    
+    if recompute_activations or not activation_file.exists():
+        print("Computing patch activations...")
+        activations = extract_patch_activations(
+            model, patches, patch_metadata, target_layer,
+            device=device, sae=sae, experiment_name=experiment_name
+        )
+        torch.save(activations, activation_file)
+    else:
+        print(f"Loading cached activations from {activation_file}")
+        activations = torch.load(activation_file)
+    
+    # Step 3: Get top-k patches per neuron
+    top_k_patches = get_top_k_patches_per_neuron(
+        activations, patches, k=k, 
+        save_dir=save_dir, 
+        experiment_name=experiment_name
+    )
+    
+    # Step 4: OPTIMIZED - Load CLIP once and batch processing
+    print("Computing clustering metrics per neuron (optimized)...")
+    num_neurons = len(top_k_patches)
+    per_neuron_results = {}
+    
+    valid_intra_dists = []
+    valid_inter_dists = []
+    
+    # Load CLIP model once outside the loop
+    import clip
+    clip_model, clip_preprocess = clip.load("ViT-B/16", device=device)
+    clip_model.eval()
+    
+    # Enable mixed precision for CLIP inference
+    from torch.cuda.amp import autocast
+    
+    # Process neurons in batches
+    neuron_indices = list(range(num_neurons))
+    
+    for batch_start in tqdm(range(0, num_neurons, neurons_per_batch), desc="Analyzing neuron batches"):
+        batch_end = min(batch_start + neurons_per_batch, num_neurons)
+        neuron_batch = neuron_indices[batch_start:batch_end]
+        
+        # Collect all patches for this batch of neurons
+        all_batch_patches = []
+        neuron_patch_ranges = []  # Track which patches belong to which neuron
+        
+        for neuron_idx in neuron_batch:
+            neuron_patches = top_k_patches[neuron_idx]
+            start_idx = len(all_batch_patches)
+            all_batch_patches.extend(neuron_patches)
+            end_idx = len(all_batch_patches)
+            neuron_patch_ranges.append((neuron_idx, start_idx, end_idx))
+        
+        if not all_batch_patches:
+            continue
+            
+        # Compute CLIP embeddings for all patches in this batch
+        all_embeddings = []
+        with torch.no_grad(), autocast():
+            for i in range(0, len(all_batch_patches), clip_batch_size):
+                batch_patches = all_batch_patches[i:i+clip_batch_size]
+                
+                # Preprocess patches
+                batch_tensors = torch.stack([clip_preprocess(patch) for patch in batch_patches])
+                batch_tensors = batch_tensors.to(device)
+                
+                # Encode with CLIP using mixed precision
+                embeddings = clip_model.encode_image(batch_tensors)
+                embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)  # Normalize
+                
+                all_embeddings.append(embeddings.cpu())
+        
+        # Concatenate all embeddings for this neuron batch
+        if all_embeddings:
+            combined_embeddings = torch.cat(all_embeddings, dim=0)
+            
+            # Process each neuron's embeddings individually for clustering
+            for neuron_idx, start_idx, end_idx in neuron_patch_ranges:
+                neuron_embeddings = combined_embeddings[start_idx:end_idx]
+                
+                # Compute clustering metrics
+                metrics = compute_clustering_metrics(
+                    neuron_embeddings, 
+                    min_cluster_size=min_cluster_size,
+                    min_samples=min_samples
+                )
+                
+                per_neuron_results[neuron_idx] = metrics
+                
+                # Collect valid metrics for averaging
+                if metrics['valid'] and metrics['intra_cluster_dist'] is not None:
+                    valid_intra_dists.append(metrics['intra_cluster_dist'])
+                if metrics['valid'] and metrics['inter_cluster_dist'] is not None:
+                    valid_inter_dists.append(metrics['inter_cluster_dist'])
+    
+    # Step 5: Compute averages
+    avg_intra_cluster_dist = np.mean(valid_intra_dists) if valid_intra_dists else None
+    avg_inter_cluster_dist = np.mean(valid_inter_dists) if valid_inter_dists else None
+    
+    # Compute ratio (higher is better - more separation between clusters)
+    if avg_intra_cluster_dist is not None and avg_inter_cluster_dist is not None:
+        separation_ratio = avg_inter_cluster_dist / avg_intra_cluster_dist
+    else:
+        separation_ratio = None
+    
+    results = {
+        'avg_intra_cluster_dist': avg_intra_cluster_dist,
+        'avg_inter_cluster_dist': avg_inter_cluster_dist,
+        'separation_ratio': separation_ratio,
+        'num_valid_neurons': len(valid_intra_dists),
+        'total_neurons': num_neurons,
+        'per_neuron_results': per_neuron_results
+    }
+    
+    # Save results
+    results_file = save_dir / f"{experiment_name}_clustering_metrics_{target_layer.replace('.', '_')}_optimized.json"
+    with open(results_file, 'w') as f:
+        json_results = {
+            'avg_intra_cluster_dist': float(avg_intra_cluster_dist) if avg_intra_cluster_dist else None,
+            'avg_inter_cluster_dist': float(avg_inter_cluster_dist) if avg_inter_cluster_dist else None,
+            'separation_ratio': float(separation_ratio) if separation_ratio else None,
+            'num_valid_neurons': len(valid_intra_dists),
+            'total_neurons': num_neurons,
+        }
+        json.dump(json_results, f, indent=2)
+    
+    print(f"\nResults saved to {results_file}")
+    print(f"\nAverage Intra-cluster Distance: {avg_intra_cluster_dist:.4f}" if avg_intra_cluster_dist else "N/A")
+    print(f"Average Inter-cluster Distance: {avg_inter_cluster_dist:.4f}" if avg_inter_cluster_dist else "N/A")
+    print(f"Separation Ratio: {separation_ratio:.4f}" if separation_ratio else "N/A")
+    print(f"Valid Neurons: {len(valid_intra_dists)}/{num_neurons}")
+    
+    return avg_intra_cluster_dist, avg_inter_cluster_dist, separation_ratio
+
+
+
+
 
 def hc_main(args):
     set_seed(0)
     
     dis_resnet_003, _ = ut.load_fully_multi_disentangled_resnet(tau=0.03)
     
-    #dis_vit_003, _ = ut.load_fully_multi_disentangled_vit(tau=0.03)
-    #dis_vit_002, _ = ut.load_fully_multi_disentangled_vit(tau=0.02)
-    #dis_vit_001, _ = ut.load_fully_multi_disentangled_vit(tau=0.01)
+    dis_vit_003, _ = ut.load_fully_multi_disentangled_vit(tau=0.03)
+    dis_vit_002, _ = ut.load_fully_multi_disentangled_vit(tau=0.02)
+    dis_vit_001, _ = ut.load_fully_multi_disentangled_vit(tau=0.01)
     
     eval_ds_res = SAEDataset(
         "/BS/disentanglement/work/sae/imagenet_resnet50_input_embeddings_val.npy", 
@@ -1059,11 +1828,11 @@ def hc_main(args):
     
     model_orig, _, _ = get_model("resnet50", "cuda:0")
     layer_of_interest = "layer4.2.conv3.0"
-    dis_resnet_001, _ = ut.load_fully_multi_disentangled_resnet(tau=0.01)
+    #dis_resnet_001, _ = ut.load_fully_multi_disentangled_resnet(tau=0.01)
     #hc_eval(model_orig=model_orig, model=dis_resnet_002, layer_of_interest="layer4.2.conv3", eval_loader=dataloader, device="cuda:0")
     #hc_eval(model_orig=model_orig, model=dis_resnet_001, layer_of_interest="layer4.2.conv3", eval_loader=dataloader, device="cuda:0")
     
-    
+
     #print("resnet_003", monosemanticity_score(experiment_name="resnet_0.03", model=dis_resnet_003, target_layer=layer_of_interest, val_loader=dataloader, sae=None, device="cuda:0"))
     #print("resnet_002", monosemanticity_score(experiment_name="resnet_0.02", model=dis_resnet_002, target_layer=layer_of_interest, val_loader=dataloader, sae=None, device="cuda:0"))
     
@@ -1071,10 +1840,61 @@ def hc_main(args):
     #print("resnet_orig", monosemanticity_score(experiment_name="resnet_orig", model=model_orig, target_layer=layer_of_interest, val_loader=dataloader, sae=None, device="cuda:0"))
     
     model_orig, _, _ = get_model("vit_b_16", "cuda:0")
-    layer_of_interest = "encoder.layers.encoder_layer_11.mlp.3"
+    layer_of_interest = "encoder.layers.encoder_layer_11.mlp.3.0"
     #hc_eval(model_orig=model_orig, model=dis_vit_001, layer_of_interest=layer_of_interest, eval_loader=dataloader, device="cuda:0")
     #hc_eval(model_orig=model_orig, model=dis_vit_002, layer_of_interest=layer_of_interest, eval_loader=dataloader, device="cuda:0")
     #hc_eval(model_orig=model_orig, model=dis_vit_003, layer_of_interest=layer_of_interest, eval_loader=dataloader, device="cuda:0")
+    
+    # metrics = compute_neuron_clustering_metric(
+    #     model=dis_vit_003,
+    #     target_layer=layer_of_interest,
+    #     val_loader=dataloader,
+    #     k=100,
+    #     patch_size=64,
+    #     experiment_name="vit_003",
+    #     save_dir="/scratch/inf0/user/dbagci/pure",
+    #     device='cuda',
+    #     sae=None,
+    #     min_cluster_size=5,
+    #     min_samples=3,
+    #     recompute_patches=False,
+    #     recompute_activations=False
+    # )
+    # print(metrics)
+    
+    # metrics = compute_neuron_clustering_metric(
+    #     model=dis_vit_002,
+    #     target_layer=layer_of_interest,
+    #     val_loader=dataloader,
+    #     k=100,
+    #     patch_size=64,
+    #     experiment_name="vit_002",
+    #     save_dir="/scratch/inf0/user/dbagci/pure",
+    #     device='cuda',
+    #     sae=None,
+    #     min_cluster_size=5,
+    #     min_samples=3,
+    #     recompute_patches=False,
+    #     recompute_activations=False
+    # )
+    # print(metrics)
+    
+    metrics = compute_neuron_clustering_metric(
+        model=dis_vit_001,
+        target_layer=layer_of_interest,
+        val_loader=dataloader,
+        k=100,
+        patch_size=64,
+        experiment_name="vit_001",
+        save_dir="/scratch/inf0/user/dbagci/pure",
+        device='cuda',
+        sae=None,
+        min_cluster_size=5,
+        min_samples=3,
+        recompute_patches=False,
+        recompute_activations=False
+    )
+    print(metrics)
     
     #print("vit_003", monosemanticity_score(experiment_name="vit_0.03", model=dis_vit_003, target_layer=layer_of_interest, val_loader=dataloader, sae=None, device="cuda:0"))
     #print("vit_002", monosemanticity_score(experiment_name="vit_0.02", model=dis_vit_002, target_layer=layer_of_interest, val_loader=dataloader, sae=None, device="cuda:0"))
@@ -1085,7 +1905,7 @@ def hc_main(args):
     
     model_orig, layer_of_interest, dimen = get_model("dinov2_vitl14", "cuda:0")
     model_orig2, _, _ = get_model("dinov2_vitl14", "cuda:0")
-    dis_dino_002, _ = ut.load_fully_multi_disentangled_dinov2(model_orig2, tau=0.02)
+    dis_dino_002, _ = ut.load_fully_multi_disentangled_dinov2(model_orig2, tau=0.001)
     hc_eval(model_orig=model_orig, model=dis_dino_002, layer_of_interest=layer_of_interest, eval_loader=dataloader, device="cuda:0")
     
     return

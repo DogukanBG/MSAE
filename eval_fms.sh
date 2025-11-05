@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH -p gpu22
+#SBATCH -p gpu24
 #SBATCH --job-name=fms_sae
 #SBATCH -o /BS/disentanglement/work/Disentanglement/jobs/sae_training/fms-%j.out
-#SBATCH --time=23:59:00
+#SBATCH --time=2:59:00
 #SBATCH --gres gpu:1
 
 STORE_DIR="/BS/disentanglement/work/msae/extract_embeddings"
@@ -260,7 +260,22 @@ STORE_DIR="/BS/disentanglement/work/msae/extract_embeddings"
 #uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --eval-hc True --tau $TAU
 
 
-MODEL="dinov2_vitl14"
-TAU=0.02
-uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --eval-hc True --tau $TAU
+#MODEL="dinov2_vitl14"
+#TAU=0.02
+#uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --eval-hc True --tau $TAU
 
+# MODEL="dinov2_vitl14"
+# TAU=0.01
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --eval-hc True --tau $TAU
+
+# MODEL="dinov2_vitl14"
+# TAU=0.02
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --eval-hc True --tau $TAU
+
+# MODEL="dinov2_vitl14"
+# TAU=0.03
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --eval-hc True --tau $TAU
+
+MODEL="dinov2_vitl14"
+TAU=0.001
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --eval-hc True --tau $TAU

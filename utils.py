@@ -22,6 +22,7 @@ import copy
 
 from polychannels import RESNET_POLY_CHANNELS_0_01, RESNET_POLY_CHANNELS_0_02, RESNET_POLY_CHANNELS_0_03, RESNET_MULTI_POLY_CHANNELS_0_03, RESNET_MULTI_POLY_CHANNELS_0_02, RESNET_MULTI_POLY_CHANNELS_0_01, VIT_MULTI_POLY_CHANNELS_0_01, VIT_MULTI_POLY_CHANNELS_0_02, VIT_MULTI_POLY_CHANNELS_0_03, DINOv2
 
+from polychannels2 import DINOv2_0001
 
 
 """
@@ -372,6 +373,12 @@ def load_fully_multi_disentangled_dinov2(model, tau=0.03):
     elif tau==0.02:
         channel_to_disentangle = {"139": [1996, 1292], "275": [1424, 1600, 1996], "471": [872, 1825, 1618, 1424], "718": [1545, 1714], "870": [1898, 1852], "901": [1652, 1556], "1018": [1874, 943]}
         model_dir = "/BS/disentanglement/work/unsupervised/dinov2/clustering_0/adaptive_kmeans/models_disentangled_0.02_recon_loss/"
+    elif tau==0.01:
+        channel_to_disentangle = {"4": [2008, 1754], "5": [1321, 1492, 1597], "35": [1996, 1646], "50": [1545, 1996, 1652], "59": [1544, 1665, 1731, 1996], "77": [2008, 1080], "99": [1545, 1996], "139": [1600, 1292, 1996, 1874, 1080, 1789], "184": [1898, 1756, 1996], "217": [872, 1665, 1798], "218": [2008, 844, 1630], "229": [1424, 1996], "275": [1424, 1600, 1995, 1996], "280": [1697, 1685, 1321], "297": [1545, 1665, 1652, 1852], "353": [1600, 1825, 1697, 1292, 1646, 1618, 1436], "358": [1825, 1646], "380": [1898, 1731], "392": [1697, 943], "406": [1080, 1001], "409": [1697, 1825, 1379, 844, 1646, 943, 1424, 1909, 1685, 2008, 1754, 1630], "471": [1825, 1544, 872, 1995, 1646, 1424, 1009, 1618, 1492, 1436, 1597], "477": [1492, 1556], "504": [1825, 1927, 1544, 1545, 1001, 1292, 2008, 1080, 1436], "508": [2008, 844], "566": [1889, 1714], "587": [1898, 1789], "685": [1545, 1798], "700": [1825, 1697], "703": [1360, 1556], "718": [1697, 1825, 1545, 1646, 943, 1714, 1436], "727": [1618, 1731, 1436], "777": [1697, 1927, 1001, 844, 1874, 1909], "783": [1545, 1652], "811": [1995, 1436], "865": [1360, 2008], "870": [1360, 1889, 1898, 1852], "901": [1424, 1556, 1652, 1685, 1756, 1597], "929": [872, 1825, 1731, 1798], "991": [947, 1436, 1646], "998": [1545, 1756], "1018": [1874, 943]}
+        model_dir = "/BS/disentanglement/work/unsupervised/dinov2/clustering_0/adaptive_kmeans/models_disentangled_0.01_recon_loss/"
+    elif tau==0.001:
+        channel_to_disentangle = DINOv2_0001
+        model_dir = "/BS/disentanglement/work/unsupervised/dinov2/clustering_0/adaptive_kmeans/models_disentangled_0.001_recon_loss/"
     else:
         assert False, "Tau not available"
 

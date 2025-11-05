@@ -125,10 +125,12 @@ def get_representation(model_path_name, model, dataset, repr_file_name, batch_si
         
         size = test_size(model) #+ test_size(model.encoder)
         do = orthogonal_decoder(model.decoder)
-        #results = {
-        #    "Model Name": [model_path_name],
-        #    "DO": [do]
-        #}
+        results = {
+           "Model Name": [model_path_name],
+           "DO": [do]
+        }
+        print(results)
+        return 
         
         #df = pd.DataFrame(results)
 
@@ -222,7 +224,7 @@ def get_representation(model_path_name, model, dataset, repr_file_name, batch_si
             "Cosine similarity": [np.mean(sparse_cs)],
             "L0 measure": [np.mean(sparse_l0)],
             "CKNNA": [np.mean(sparse_cknnas)],
-            "DO": [do],
+            #"DO": [do],
             "Size": [size]
         }
 
@@ -322,6 +324,7 @@ def main(args):
     
     # Extract representations and compute metrics
     #get_representation(model_path_name, model, dataset, repr_file_name, args.batch_size)
+
     dataloader, _ = create_data_loaders("/scratch/inf0/user/mparcham/ILSVRC2012/val_categorized", num_workers=0)
     import metrics as m
     

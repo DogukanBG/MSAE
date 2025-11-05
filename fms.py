@@ -234,7 +234,7 @@ def get_model(args, model_name: str, device: str):
         import torch.hub
         model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14')
         embedding_dim =1024
-        layer_path="blocks.23.mlp.fc2" if not args.eval_hc else "blocks.23.mlp.fc2"
+        layer_path="blocks.23.mlp.fc2" if not args.eval_hc else "blocks.23.mlp.fc2.0"
     else:
         raise ValueError(f"Unsupported model {model_name}")
     
@@ -269,7 +269,7 @@ def main(args):
         sae.to(device)
         sae.eval()
     
-    model, layer_path, embedding_dim = get_model(args, args.model, device)
+    #model, layer_path, embedding_dim = get_model(args, args.model, device)
     fms = compute_fms_score(model, sae, experiment_name, layer_path)
     
     experiment_name = f"hc{args.tau}" + args.model if args.eval_hc else args.sae

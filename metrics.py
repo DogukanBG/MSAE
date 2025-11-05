@@ -720,7 +720,6 @@ import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 import pickle
-import hdbscan
 from sklearn.metrics import pairwise_distances
 import clip
 from PIL import Image
@@ -1477,3 +1476,5 @@ def compute_neuron_clustering_metric_optimized(
     print(f"Valid Neurons: {len(valid_intra_dists)}/{num_neurons}")
     
     return avg_intra_cluster_dist, avg_inter_cluster_dist, separation_ratio
+
+
