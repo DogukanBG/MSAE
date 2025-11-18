@@ -1,8 +1,8 @@
 #!/bin/sh
 #SBATCH -p gpu22
-#SBATCH -t 23:59:00
+#SBATCH -t 20:00:00
 #SBATCH -o /BS/disentanglement/work/Disentanglement/jobs/hc/hc_eval-%j.out
-#SBATCH --gres gpu:a100:1
+#SBATCH --gres gpu:1
 
 DATA_DIR="/scratch/inf0/user/mparcham/ILSVRC2012/train"
 DATASET="imagenet"
@@ -17,4 +17,29 @@ EPOCHS=10
 M="ReLUSAE" # "TopKSAE", "BatchTopKSAE"
 ACTIVATION='ReLU_003' # 'TopKReLU_64'
 EXPANSION_FACTOR=8
-uv run /BS/disentanglement/work/Disentanglement/MSAE/train.py -dt "$DT" -ds "$DS" -m "$M" -a "$ACTIVATION" -ef "$EXPANSION_FACTOR" -e "$EPOCHS" --eval_hc True
+
+
+TAU=0.015
+
+MODEL_ORIG="dinov2_vitb14-supervised"
+#uv run /BS/disentanglement/work/Disentanglement/MSAE/train.py -dt "$DT" -ds "$DS" -m "$M" -a "$ACTIVATION" -ef "$EXPANSION_FACTOR" -e "$EPOCHS" --eval_hc True --tau $TAU --model_orig "$MODEL_ORIG"
+
+MODEL_ORIG="dinov2_vitb14-IG"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/train.py -dt "$DT" -ds "$DS" -m "$M" -a "$ACTIVATION" -ef "$EXPANSION_FACTOR" -e "$EPOCHS" --eval_hc True --tau $TAU --model_orig "$MODEL_ORIG"
+
+
+TAU=0.02
+#MODEL_ORIG="resnet50"
+#uv run /BS/disentanglement/work/Disentanglement/MSAE/train.py -dt "$DT" -ds "$DS" -m "$M" -a "$ACTIVATION" -ef "$EXPANSION_FACTOR" -e "$EPOCHS" --eval_hc True --tau $TAU --model_orig "$MODEL_ORIG"
+
+MODEL_ORIG="dinov2_vitb14-supervised"
+#uv run /BS/disentanglement/work/Disentanglement/MSAE/train.py -dt "$DT" -ds "$DS" -m "$M" -a "$ACTIVATION" -ef "$EXPANSION_FACTOR" -e "$EPOCHS" --eval_hc True --tau $TAU --model_orig "$MODEL_ORIG"
+
+#MODEL_ORIG="dinov2_vitb14-IG"
+#uv run /BS/disentanglement/work/Disentanglement/MSAE/train.py -dt "$DT" -ds "$DS" -m "$M" -a "$ACTIVATION" -ef "$EXPANSION_FACTOR" -e "$EPOCHS" --eval_hc True --tau $TAU --model_orig "$MODEL_ORIG"
+
+
+TAU=0.01
+MODEL_ORIG="dinov2_vitb14-supervised"
+#uv run /BS/disentanglement/work/Disentanglement/MSAE/train.py -dt "$DT" -ds "$DS" -m "$M" -a "$ACTIVATION" -ef "$EXPANSION_FACTOR" -e "$EPOCHS" --eval_hc True --tau $TAU --model_orig "$MODEL_ORIG"
+

@@ -1,5 +1,5 @@
 #!/bin/sh
-#SBATCH -p gpu17
+#SBATCH -p gpu16
 #SBATCH -t 20:00:00
 #SBATCH -o /BS/disentanglement/work/Disentanglement/jobs/train/dino_sae-%j.out
 #SBATCH --gres gpu:1
@@ -10,7 +10,7 @@ DATA_DIR="/scratch/inf0/user/mparcham/ILSVRC2012/val_categorized"
 DATASET="imagenet"
 MODEL="dinov2_vitl14" #"dinov2_vitl14"
 SAVE_DIR="/BS/disentanglement/work"
-BATCH_SIZE=16384
+BATCH_SIZE=1024
 
 DT="/BS/disentanglement/work/sae/imagenet_dinov2_vitl14_embeddings_train.npy"
 DS="/BS/disentanglement/work/sae/imagenet_dinov2_vitl14_embeddings_val.npy"

@@ -5,7 +5,9 @@ import argparse
 import numpy as np
 from tqdm import tqdm
 import random
-
+import wandb
+import gc
+from pathlib import Path
 from sae import load_model
 from utils import SAEDataset, set_seed, get_device
 from metrics import (
@@ -15,286 +17,361 @@ from metrics import (
     cknna,
     orthogonal_decoder
 )
-import pandas as pd
+import torchvision
+import torchvision.transforms as transforms
+from torchvision.datasets import ImageFolder
+from torch.utils.data import DataLoader
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
+    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
-def set_seed(seed: int) -> None:
-    """
-    Set random seeds for reproducibility across all random number generators.
-    
-    Args:
-        seed (int): The seed value to use
-    """
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
 
 def parse_args() -> argparse.Namespace:
-    """
-    Parse command line arguments for the representation extraction and evaluation script.
+    parser = argparse.ArgumentParser(description="Extract and evaluate representations from SAE models")
+    parser.add_argument("-m", "--model", type=str, required=True, help="Path to the trained model file (.pt)")
+    parser.add_argument("-d", "--data", type=str, required=True, help="Path to the dataset file (.npy)")
+    parser.add_argument("-b", "--batch-size", type=int, default=10000, help="Batch size for processing data")
+    parser.add_argument("-o", "--output-path", type=str, default=".", help="Directory path to save extracted representations")
+    parser.add_argument("-s", "--seed", type=int, default=42, help="Random seed for reproducibility")
     
-    Returns:
-        argparse.Namespace: Parsed command line arguments.
-    """
-    parser = argparse.ArgumentParser(description="Extract and evaluate representations from Sparse Autoencoder models")
-    parser.add_argument("-m", "--model", type=str, required=True, 
-                        help="Path to the trained model file (.pt)")
-    parser.add_argument("-d", "--data", type=str, required=True, 
-                        help="Path to the dataset file (.npy)")
-    parser.add_argument("-b", "--batch-size", type=int, default=10000, 
-                        help="Batch size for processing data")
-    parser.add_argument("-o", "--output-path", type=str, default=".", 
-                        help="Directory path to save extracted representations")
-    parser.add_argument("-s", "--seed", type=int, default=42, 
-                        help="Random seed for reproducibility")
-
+    # W&B arguments
+    parser.add_argument("--wandb-project", type=str, default="sae-evaluation", help="W&B project name")
+    parser.add_argument("--wandb-entity", type=str, default=None, help="W&B entity/team name")
+    parser.add_argument("--wandb-run-name", type=str, default=None, help="W&B run name (auto-generated if not provided)")
+    parser.add_argument("--wandb-tags", type=str, nargs="+", default=[], help="Tags for W&B run")
+    parser.add_argument("--wandb-notes", type=str, default="", help="Notes for W&B run")
+    parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
+    
+    # Monosemanticity metric arguments
+    parser.add_argument("--compute-monosemanticity", action="store_true", help="Compute monosemanticity clustering metrics")
+    parser.add_argument("--imagenet-path", type=str, default="/scratch/inf0/user/mparcham/ILSVRC2012/val_categorized", 
+                        help="Path to ImageNet validation set")
+    parser.add_argument("--log-top-patches", action="store_true", help="Log top-k activating patches to W&B")
+    parser.add_argument("--num-patches-to-log", type=int, default=5, help="Number of top patches to log per neuron")
+    parser.add_argument("--num-neurons-to-log", type=int, default=20, help="Number of neurons to log patches for")
+    
     return parser.parse_args()
 
 
-def test_size(model) -> float:
-    """Return total number of parameters in millions."""
-    print("Computing model size...")
-    total_params = sum(p.numel() for p in model.parameters())
-    return round(total_params / 1_000_000, 1)
+def test_size(model: str) -> float:
+    splits = model.split("_")
+    ef = int(float(splits[0]) / float(splits[1]))
+    return ef
 
 
-def get_representation(model_path_name, model, dataset, repr_file_name, batch_size):
-    """
-    Extract representations from the model for the given dataset and evaluate model performance.
-    
-    Extracts both output reconstructions and latent representations from the model,
-    saves them to disk as memory-mapped files, and computes various performance metrics.
-    
-    Args:
-        model: The Sparse Autoencoder model to evaluate
-        dataset: Dataset to process
-        repr_file_name (str): Base filename for saving representations
-        batch_size (int): Number of samples to process at once
-        
-    Metrics computed:
-        - Fraction of Variance Unexplained (FVU) using normalized MSE
-        - Normalized Mean Absolute Error (MAE)
-        - Cosine similarity between inputs and outputs
-        - L0 measure (average number of active neurons per sample)
-        - CKNNA (Cumulative k-Nearest Neighbor Accuracy)
-        - Number of dead neurons (neurons that never activate)
-    """
-    device = get_device()
-    logger.info(f"Using device: {device}")
-    
-    model.eval()
-    model.to(device)
-    with torch.no_grad():
-        # Prepare memory-mapped file for output reconstructions
-        repr_file_name_output = f"{repr_file_name}_output_{len(dataset)}_{model.n_inputs}.npy"
-        memmap_output = np.memmap(repr_file_name_output, dtype='float32', mode='w+', 
-                                  shape=(len(dataset), model.n_inputs))
-        logger.info(f"Data output with shape {memmap_output.shape} will be saved to {repr_file_name_output}")
-
-        # Prepare memory-mapped file for latent representations
-        repr_file_name_repr = f"{repr_file_name}_repr_{len(dataset)}_{model.n_latents}.npy"
-        memmap_repr = np.memmap(repr_file_name_repr, dtype='float32', mode='w+', 
-                                shape=(len(dataset), model.n_latents))
-        logger.info(f"Data repr with shape {memmap_repr.shape} will be saved to {repr_file_name_repr}")
-
-        # Create dataloader for batch processing
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, 
-                                               shuffle=True, num_workers=0)
-        
-        # Lists to collect metrics for each batch
-        l0 = []
-        mae = []
-        fvu = []
-        cs = []
-        cknnas = []
-        sparse_l0 = []
-        sparse_mae = []
-        sparse_fvu = []
-        sparse_cs = []
-        sparse_cknnas = []
-        dead_neurons_count = None
-        
-        size = test_size(model) #+ test_size(model.encoder)
-        do = orthogonal_decoder(model.decoder)
-        results = {
-           "Model Name": [model_path_name],
-           "DO": [do]
-        }
-        print(results)
-        return 
-        
-        #df = pd.DataFrame(results)
-
-        # Append instead of overwrite
-        #csv_file = "/BS/disentanglement/work/Disentanglement/MSAE/results_do.csv"
-        #df.to_csv(csv_file, mode="a", index=False, header=not os.path.exists(csv_file))
-        
-        #print(results)
-
-        # Process data in batches
-        for idx, batch in enumerate(tqdm(dataloader, desc="Extracting representations")):
-            start = batch_size * idx
-            end = start + batch.shape[0]
-            batch = batch.to(device)
-            
-            # Forward pass through the model
-            with torch.no_grad():
-                sparse_outputs, sparse_representation, outputs, representations = model(batch)
-            
-            # Post-process outputs and batch
-            batch = dataset.unprocess_data(batch.cpu()).to(device)
-            outputs = dataset.unprocess_data(outputs.cpu()).to(device)
-            sparse_outputs = dataset.unprocess_data(sparse_outputs.cpu()).to(device)
-            
-            
-            # Save the outputs and representations to the memmap files
-            outputs_numpy = outputs.cpu().numpy()
-            memmap_output[start:end] = outputs_numpy
-            memmap_output.flush()
-
-            representations_numpy = representations.cpu().numpy()
-            memmap_repr[start:end] = representations_numpy
-            memmap_repr.flush()
-
-            # Calculate and collect metrics
-            fvu.append(explained_variance_full(batch, outputs))
-            mae.append(normalized_mean_absolute_error(batch, outputs))
-            cs.append(torch.nn.functional.cosine_similarity(batch, outputs))
-            l0.append(l0_messure(representations))
-            # Only calculate the cknna if it even to the number of the batch
-            if batch.shape[0] == batch_size:
-                cknnas.append(cknna(batch, representations, topk=10))
-            
-            sparse_fvu.append(explained_variance_full(batch, sparse_outputs))
-            sparse_mae.append(normalized_mean_absolute_error(batch, sparse_outputs))
-            sparse_cs.append(torch.nn.functional.cosine_similarity(batch, sparse_outputs))
-            sparse_l0.append(l0_messure(sparse_representation))
-            # Only calculate the cknna if it even to the number of the batch
-            if batch.shape[0] == batch_size:
-                sparse_cknnas.append(cknna(batch, sparse_representation, topk=10))
-            
-            # Track neurons that are activated at least once
-            if dead_neurons_count is None:
-                dead_neurons_count = (representations != 0).sum(dim=0).cpu().long()
-            else:
-                dead_neurons_count += (representations != 0).sum(dim=0).cpu().long()
-
-        # Aggregate metrics across all batches
-        mae = torch.cat(mae, dim=0).cpu().numpy()
-        cs = torch.cat(cs, dim=0).cpu().numpy()
-        l0 = torch.cat(l0, dim=0).cpu().numpy()
-        fvu = torch.cat(fvu, dim=0).cpu().numpy()
-        cknnas = np.array(cknnas)
-        sparse_mae = torch.cat(sparse_mae, dim=0).cpu().numpy()
-        sparse_cs = torch.cat(sparse_cs, dim=0).cpu().numpy()
-        sparse_l0 = torch.cat(sparse_l0, dim=0).cpu().numpy()
-        sparse_fvu = torch.cat(sparse_fvu, dim=0).cpu().numpy()
-        sparse_cknnas = np.array(sparse_cknnas)
-        
-        # Count neurons that were never activated
-        number_of_dead_neurons = torch.where(dead_neurons_count == 0)[0].shape[0]
-
-        # Log final metrics
-        logger.info(f"Fraction of Variance Unexplained (FVU): {np.mean(fvu)} +/- {np.std(fvu)}")
-        logger.info(f"Normalized MAE: {np.mean(mae)} +/- {np.std(mae)}")
-        logger.info(f"Cosine similarity: {np.mean(cs)} +/- {np.std(cs)}")
-        logger.info(f"L0 messure: {np.mean(l0)} +/- {np.std(l0)}")
-        logger.info(f"CKNNA: {np.mean(cknnas)} +/- {np.std(cknnas)}")
-        logger.info(f"Number of dead neurons: {number_of_dead_neurons}")
-        logger.info(f"\nSparse Fraction of Variance Unexplained (FVU): {np.mean(sparse_fvu)} +/- {np.std(sparse_fvu)}")
-        logger.info(f"Sparse Normalized MAE: {np.mean(sparse_mae)} +/- {np.std(sparse_mae)}")
-        logger.info(f"Sparse Cosine similarity: {np.mean(sparse_cs)} +/- {np.std(sparse_cs)}")
-        logger.info(f"Sparse L0 measure: {np.mean(sparse_l0)} +/- {np.std(sparse_l0)}")
-        logger.info(f"Sparse CKNNA: {np.mean(sparse_cknnas)} +/- {np.std(sparse_cknnas)}")
-        
-        results = {
-            "Model Name": [model_path_name],
-            "Number of dead neurons": [number_of_dead_neurons],
-            "Fraction of Variance Unexplained (FVU)": [np.mean(sparse_fvu)],
-            "Normalized MAE": [np.mean(sparse_mae)],
-            "Cosine similarity": [np.mean(sparse_cs)],
-            "L0 measure": [np.mean(sparse_l0)],
-            "CKNNA": [np.mean(sparse_cknnas)],
-            #"DO": [do],
-            "Size": [size]
-        }
-
-        df = pd.DataFrame(results)
-
-        # Append instead of overwrite
-        csv_file = "/BS/disentanglement/work/Disentanglement/MSAE/results_sae.csv"
-        df.to_csv(csv_file, mode="a", index=False, header=not os.path.exists(csv_file))
-
-import torchvision
 def get_model(model_name: str, device: str):
-    """
-    Returns a model for image embeddings.
-    """
+    """Returns a model for image embeddings."""
     if model_name.lower() == "resnet50":
         model = torchvision.models.resnet50(pretrained=True)
-        #model = nn.Sequential(*list(model.children())[:-1])  # Remove classifier
-        embedding_dim = 2048 
-        layer_path="layer4.2.conv3" 
+        embedding_dim = 2048
+        layer_path = "layer4.2.conv3"
     elif model_name.lower() == "convnext_tiny":
         model = torchvision.models.convnext_tiny(pretrained=True)
-        #model = nn.Sequential(*list(model.features), nn.AdaptiveAvgPool2d(1))
         embedding_dim = 768
+        layer_path = None
     elif model_name.lower() == "vit_b_16":
         model = torchvision.models.vit_b_16(pretrained=True)
-        #model.heads = nn.Identity()
         embedding_dim = 768
-        layer_path = "encoder.layers.encoder_layer_11.mlp.3" 
+        layer_path = "encoder.layers.encoder_layer_11.mlp.3"
     elif model_name.lower() == "dinov2_vitl14":
         import torch.hub
         model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14')
-        embedding_dim =1024
-        layer_path="blocks.23.mlp.fc2" 
+        embedding_dim = 1024
+        layer_path = "blocks.23.mlp.fc2"
+    elif model_name.lower() == "dinov2_vitb14":
+        import torch.hub
+        model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+        embedding_dim = 768
+        layer_path = "blocks.11.mlp.fc2"
     else:
         raise ValueError(f"Unsupported model {model_name}")
     
     model.to(device).eval()
     return model, layer_path, embedding_dim
 
-import torchvision.transforms as transforms
-from torchvision.datasets import ImageFolder
-from torch.utils.data import DataLoader
 
-def create_data_loaders(root: str, batch_size: int = 256, num_workers: int = 0, image_size: int = 224):    
+def create_data_loaders(root: str, batch_size: int = 256, num_workers: int = 0, image_size: int = 224):
+    """Create ImageNet data loaders."""
     transform = transforms.Compose([
         transforms.Resize(256),
         transforms.CenterCrop(image_size),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                             std=[0.229, 0.224, 0.225])
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
+    
     dataset = ImageFolder(root=root, transform=transform)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
-                        num_workers=num_workers, pin_memory=True)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, 
+                       num_workers=num_workers, pin_memory=True)
     return loader, len(dataset)
 
-def main(args):
+
+def log_top_activating_patches(top_k_patches_dict, num_neurons=20, num_patches=5, 
+                               neuron_indices=None):
     """
-    Main function to load model and dataset, then extract and evaluate representations.
+    Log top activating patches for selected neurons to W&B.
     
     Args:
-        args (argparse.Namespace): Command line arguments.
+        top_k_patches_dict: Dictionary mapping neuron_idx -> list of PIL images
+        num_neurons: Number of neurons to visualize
+        num_patches: Number of patches to show per neuron
+        neuron_indices: Specific neuron indices to log (if None, samples randomly)
     """
-    # Set random seed for reproducibility
+    if wandb.run is None:
+        return
+    
+    total_neurons = len(top_k_patches_dict)
+    
+    # Select neurons to visualize
+    if neuron_indices is None:
+        # Sample uniformly across all neurons
+        step = max(1, total_neurons // num_neurons)
+        neuron_indices = list(range(0, total_neurons, step))[:num_neurons]
+    
+    logger.info(f"Logging top-{num_patches} patches for {len(neuron_indices)} neurons to W&B...")
+    
+    # Create a table for organized viewing
+    columns = ["neuron_idx"] + [f"patch_{i+1}" for i in range(num_patches)]
+    table = wandb.Table(columns=columns)
+    
+    for neuron_idx in neuron_indices:
+        if neuron_idx not in top_k_patches_dict:
+            continue
+            
+        patches = top_k_patches_dict[neuron_idx][:num_patches]
+        
+        # Convert patches to wandb.Image objects
+        row = [neuron_idx]
+        for patch in patches:
+            row.append(wandb.Image(patch, caption=f"Neuron {neuron_idx}"))
+        
+        # Pad if we have fewer patches than expected
+        while len(row) < len(columns):
+            row.append(None)
+            
+        table.add_data(*row)
+    
+    wandb.log({"top_activating_patches": table})
+    
+    # Also create a panel view for better visualization
+    images_dict = {}
+    for neuron_idx in neuron_indices[:10]:  # Limit to 10 for panel view
+        if neuron_idx not in top_k_patches_dict:
+            continue
+        patches = top_k_patches_dict[neuron_idx][:num_patches]
+        images_dict[f"neuron_{neuron_idx}"] = [wandb.Image(p) for p in patches]
+    
+    if images_dict:
+        wandb.log({"patch_grid": images_dict})
+
+def extract_sae_type(model_path_name):
+    if "ReLU_003" in model_path_name:
+        return "ReLU_003"
+    elif "TopKReLU_64_RW_" in model_path_name:
+        return "TopKReLU_64_RW"
+    elif "TopKReLU_64_UW_" in model_path_name:
+        return "TopKReLU_64_UW"
+    elif "TopKReLU_64_UW_" in model_path_name:
+        return "TopKReLU_64_UW"
+    elif "TopKReLU_256" in model_path_name and "batchtopk" in model_path_name:
+        return "BatchTopKReLU_256"
+    elif "TopKReLU_64" in model_path_name and "batchtopk" in model_path_name:
+        return "BatchTopKReLU_64"
+    elif "TopKReLU_256" in model_path_name and not "batchtopk" in model_path_name:
+        return "TopKReLU_256"
+    elif "TopKReLU_64" in model_path_name and not "batchtopk" in model_path_name:
+        return "TopKReLU_64"
+
+def get_representation(model_path_name, model, dataset, repr_file_name, batch_size, log_to_wandb=True):
+    """
+    Extract representations and evaluate model with W&B logging.
+    """
+    device = get_device()
+    logger.info(f"Using device: {device}")
+    
+    model.eval()
+    model.to(device)
+    
+    sae_type = extract_sae_type(model_path_name)
+    
+    # Log model architecture to W&B
+    if log_to_wandb and wandb.run is not None:
+        wandb.watch(model, log="all", log_freq=100)
+    
+    with torch.no_grad():
+        # Prepare memory-mapped files
+        # repr_file_name_output = f"{repr_file_name}_output_{len(dataset)}_{model.n_inputs}.npy"
+        # memmap_output = np.memmap(repr_file_name_output, dtype='float32', mode='w+', 
+        #                            shape=(len(dataset), model.n_inputs))
+        
+        # repr_file_name_repr = f"{repr_file_name}_repr_{len(dataset)}_{model.n_latents}.npy"
+        # memmap_repr = np.memmap(repr_file_name_repr, dtype='float32', mode='w+', 
+        #                         shape=(len(dataset), model.n_latents))
+        
+        # Create dataloader
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, 
+                                                 shuffle=True, num_workers=0)
+        
+        # Metrics lists
+        metrics_dict = {
+            'l0': [], 'mae': [], 'fvu': [], 'cs': [], 'local_cknnas': [], 'global_cknnas': [],
+            'sparse_l0': [], 'sparse_mae': [], 'sparse_fvu': [], 'sparse_cs': [], 'local_sparse_cknnas': [], 'global_sparse_cknnas': [],
+            'local_hidden_cknnas': [], 'global_hidden_cknnas': [], 'local_hidden_sparse_cknnas': [], 'global_hidden_sparse_cknnas': []
+        }
+        dead_neurons_count = None
+        
+        # Process batches
+        for idx, batch in enumerate(tqdm(dataloader, desc="Extracting representations")):
+            start = batch_size * idx
+            end = start + batch.shape[0]
+            batch = batch.to(device)
+            
+            with torch.no_grad():
+                sparse_outputs, sparse_representation, outputs, representations = model(batch)
+            
+            # Unprocess data
+            # batch = dataset.unprocess_data(batch.cpu()).to(device)
+            # outputs = dataset.unprocess_data(outputs.cpu()).to(device)
+            # sparse_outputs = dataset.unprocess_data(sparse_outputs.cpu()).to(device)
+            
+            # Save to memmap
+            # memmap_output[start:end] = outputs.cpu().numpy()
+            # memmap_output.flush()
+            # memmap_repr[start:end] = representations.cpu().numpy()
+            # memmap_repr.flush()
+            
+            # Calculate metrics
+            metrics_dict['fvu'].append(explained_variance_full(batch, outputs))
+            metrics_dict['mae'].append(normalized_mean_absolute_error(batch, outputs))
+            metrics_dict['cs'].append(torch.nn.functional.cosine_similarity(batch, outputs))
+            metrics_dict['l0'].append(l0_messure(representations))
+            
+            if batch.shape[0] == batch_size:
+                metrics_dict['local_cknnas'].append(cknna(batch, representations, topk=5))
+                metrics_dict['global_cknnas'].append(cknna(batch, representations, topk=None))
+                
+                metrics_dict['local_hidden_cknnas'].append(cknna(batch, outputs, topk=5))
+                metrics_dict['global_hidden_cknnas'].append(cknna(batch, outputs, topk=None))
+            
+            metrics_dict['sparse_fvu'].append(explained_variance_full(batch, sparse_outputs))
+            metrics_dict['sparse_mae'].append(normalized_mean_absolute_error(batch, sparse_outputs))
+            metrics_dict['sparse_cs'].append(torch.nn.functional.cosine_similarity(batch, sparse_outputs))
+            metrics_dict['sparse_l0'].append(l0_messure(sparse_representation))
+            
+            if batch.shape[0] == batch_size:
+                metrics_dict['local_sparse_cknnas'].append(cknna(batch, sparse_representation, topk=5))
+                metrics_dict['global_sparse_cknnas'].append(cknna(batch, sparse_representation, topk=None))
+                
+                metrics_dict['local_hidden_sparse_cknnas'].append(cknna(batch, sparse_outputs, topk=5))
+                metrics_dict['global_hidden_sparse_cknnas'].append(cknna(batch, sparse_outputs, topk=None))
+            
+            # Track dead neurons
+            if dead_neurons_count is None:
+                dead_neurons_count = (representations != 0).sum(dim=0).cpu().long()
+            else:
+                dead_neurons_count += (representations != 0).sum(dim=0).cpu().long()
+            
+            # Log batch metrics to W&B
+            if log_to_wandb and wandb.run is not None and idx % 10 == 0:
+                wandb.log({
+                    "batch_idx": idx,
+                    "batch/sparse_fvu": metrics_dict['sparse_fvu'][-1].mean().item(),
+                    "batch/sparse_l0": metrics_dict['sparse_l0'][-1].mean().item(),
+                })
+        
+        # Aggregate metrics
+        aggregated = {}
+        for key in ['mae', 'cs', 'l0', 'fvu', 'sparse_mae', 'sparse_cs', 'sparse_l0', 'sparse_fvu']:
+            aggregated[key] = torch.cat(metrics_dict[key], dim=0).cpu().numpy()
+        
+        aggregated['local_cknnas'] = np.array(metrics_dict['local_cknnas'])
+        aggregated['global_cknnas'] = np.array(metrics_dict['global_cknnas'])
+        aggregated['local_sparse_cknnas'] = np.array(metrics_dict['local_sparse_cknnas'])
+        aggregated['global_sparse_cknnas'] = np.array(metrics_dict['global_sparse_cknnas'])
+        
+        aggregated['local_hidden_cknnas'] = np.array(metrics_dict['local_hidden_cknnas'])
+        aggregated['global_hidden_cknnas'] = np.array(metrics_dict['global_hidden_cknnas'])
+        aggregated['local_hidden_sparse_cknnas'] = np.array(metrics_dict['local_hidden_sparse_cknnas'])
+        aggregated['global_hidden_sparse_cknnas'] = np.array(metrics_dict['global_hidden_sparse_cknnas'])
+        
+        number_of_dead_neurons = torch.where(dead_neurons_count == 0)[0].shape[0]
+        do = orthogonal_decoder(model.decoder)
+        
+        # Compute final metrics
+        final_metrics = {
+            "model_name": model_path_name,
+            "SAE_TYPE": sae_type,
+            "num_dead_neurons": int(number_of_dead_neurons),
+            #"dead_neurons_pct": round(100 * number_of_dead_neurons / model.n_latents, 2),
+            "fvu_mean": float(np.mean(aggregated['sparse_fvu'])),
+            #"fvu_std": float(np.std(aggregated['sparse_fvu'])),
+            "mae_mean": float(np.mean(aggregated['sparse_mae'])),
+            #"mae_std": float(np.std(aggregated['sparse_mae'])),
+            "cosine_sim_mean": float(np.mean(aggregated['sparse_cs'])),
+            #"cosine_sim_std": float(np.std(aggregated['sparse_cs'])),
+            "l0_mean": float(np.mean(aggregated['sparse_l0'])),
+            #"l0_std": float(np.std(aggregated['sparse_l0'])),
+            
+            "local_cknna_mean": float(np.mean(aggregated['local_sparse_cknnas'])),
+            #"local_cknna_std": float(np.std(aggregated['local_sparse_cknnas'])),
+            "global_cknna_mean": float(np.mean(aggregated['global_sparse_cknnas'])),
+            #"global_cknna_std": float(np.std(aggregated['global_sparse_cknnas'])),
+            "local_hidden_cknna_mean": float(np.mean(aggregated['local_hidden_sparse_cknnas'])),
+            #"local_cknna_std": float(np.std(aggregated['local_sparse_cknnas'])),
+            "global_hidden_cknna_mean": float(np.mean(aggregated['global_hidden_sparse_cknnas'])),
+            #"global_cknna_std": float(np.std(aggregated['global_sparse_cknnas'])),
+            
+            "decoder_orthogonality": float(do),
+            "expansion_f": int(int(model.n_latents)/int(model.n_inputs)),
+        }
+        
+        # Log to console
+        logger.info("\n" + "="*50)
+        logger.info("FINAL EVALUATION METRICS")
+        logger.info("="*50)
+        for key, value in final_metrics.items():
+            logger.info(f"{key}: {value}")
+        logger.info("="*50 + "\n")
+        
+        # Log to W&B
+        if log_to_wandb and wandb.run is not None:
+            wandb.log(final_metrics)
+            
+            # Create summary metrics
+            wandb.run.summary.update(final_metrics)
+            
+            # Log histograms
+            # wandb.log({
+            #     "histograms/sparse_fvu": wandb.Histogram(aggregated['sparse_fvu']),
+            #     "histograms/sparse_l0": wandb.Histogram(aggregated['sparse_l0']),
+            #     "histograms/dead_neurons": wandb.Histogram(dead_neurons_count.cpu().numpy()),
+            # })
+            
+            # Save artifacts
+            #artifact = wandb.Artifact(f"representations-{model_path_name}", type="representations")
+            #artifact.add_file(repr_file_name_output)
+            #artifact.add_file(repr_file_name_repr)
+            #wandb.log_artifact(artifact)
+        
+        return final_metrics
+
+
+def main(args):
     set_seed(args.seed)
     
-    # Load the trained model
-    model, mean_center, scaling_factor, target_norm = load_model(args.model)
-    logger.info("Model loaded")
+    # Extract model and data names
+    model_path_name = args.model.split("/")[-1].replace(".pt", "")
+    if "batchtopk" in args.model:
+        model_path_name += "_batchtopk"
     
+    data_path_name = args.data.split("/")[-1].replace(".npy", "")
+    
+    expansion_factor = test_size(model_path_name)
+    
+    # Determine model type
     model_type = None
     if "resnet50" in args.data:
         model_type = "resnet50"
@@ -302,95 +379,173 @@ def main(args):
         model_type = "vit_b_16"
     elif "dinov2_vitl14" in args.data:
         model_type = "dinov2_vitl14"
+    elif "dinov2_vitb14" in args.data:
+        model_type = "dinov2_vitb14"
+    
+    # Initialize W&B
+    use_wandb = not args.no_wandb
+    if use_wandb:
+        run_name = args.wandb_run_name or f"{model_path_name}_{data_path_name}"
         
-    model_orig, layer_path, embedding_dim = get_model(model_name=model_type, device="cuda:0")
-    
-    # Load the dataset with appropriate preprocessing
-    if ("text" in args.model and "text" in args.data) or ("image" in args.model and "image" in args.data):
-        logger.info("Using model mean and scalling factor")    
-        dataset = SAEDataset(args.data, split="val", model_type=model_type)
-        dataset.mean = mean_center.cpu()
-        dataset.scaling_factor = scaling_factor
-    else:    
-        logger.info("Computing mean and scalling factor")    
-        dataset = SAEDataset(args.data, mean_center=True if mean_center.sum() != 0.0 else False, target_norm=target_norm, split="val", model_type=model_type)
+        config = {
+            "model_path": args.model,
+            "data_path": args.data,
+            "batch_size": args.batch_size,
+            "seed": args.seed,
+            "model_type": model_type,
+            "data_name": data_path_name,
+            "expansion_factor": expansion_factor,
+            "compute_monosemanticity": args.compute_monosemanticity,
+        }
         
-    logger.info(f"Dataset loaded with length: {len(dataset)}")
-    logger.info(f"Dataset mean center: {dataset.mean.mean()}, Scaling factor: {dataset.scaling_factor} with target norm {dataset.target_norm}")
-    # Construct output filename from model and data names
-    model_path_name = args.model.split("/")[-1].replace(".pt","") if not ("batchtopk" in args.model) else args.model.split("/")[-1].replace(".pt","") + "batchtopk"
-    data_path_name = args.data.split("/")[-1].replace(".npy","")
-    repr_file_name = os.path.join(args.output_path, f"{data_path_name}_{model_path_name}")
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            group=model_type,
+            name=run_name,
+            tags=args.wandb_tags + ([model_type] if model_type else []),
+            notes=args.wandb_notes,
+            config=config
+        )
+        logger.info(f"W&B run initialized: {wandb.run.name}")
     
-    # Extract representations and compute metrics
-    #get_representation(model_path_name, model, dataset, repr_file_name, args.batch_size)
-
-    dataloader, _ = create_data_loaders("/scratch/inf0/user/mparcham/ILSVRC2012/val_categorized", num_workers=0)
-    import metrics as m
+    try:
+        # Load model
+        model, mean_center, scaling_factor, target_norm = load_model(args.model)
+        logger.info("Model loaded")
+        
+        # Load dataset
+        if ("text" in args.model and "text" in args.data) or ("image" in args.model and "image" in args.data):
+            dataset = SAEDataset(args.data, split="val", model_type=model_type)
+            dataset.mean = mean_center.cpu()
+            dataset.scaling_factor = scaling_factor
+        else:
+            dataset = SAEDataset(
+                args.data,
+                mean_center=mean_center.sum() != 0.0,
+                target_norm=target_norm,
+                split="val",
+                model_type=model_type
+            )
+        
+        logger.info(f"Dataset loaded with length: {len(dataset)}")
+        
+        # Log dataset info to W&B
+        if use_wandb:
+            wandb.config.update({
+                "dataset_size": len(dataset),
+                "mean_center": float(dataset.mean.mean()),
+                "scaling_factor": float(dataset.scaling_factor),
+                "target_norm": float(dataset.target_norm) if dataset.target_norm else None,
+                "n_latents": int(model.n_latents),
+                "n_inputs": int(model.n_inputs),
+            })
+        
+        # Extract representations and evaluate
+        repr_file_name = os.path.join(args.output_path, f"{data_path_name}_{model_path_name}")
+        final_metrics = {}
+        if args.compute_monosemanticity:
+            final_metrics = get_representation(
+                model_path_name, model, dataset, repr_file_name, 
+                args.batch_size, log_to_wandb=use_wandb
+            )
+        
+        # Compute monosemanticity metrics if requested
+        if args.compute_monosemanticity and model_type is not None:
+            logger.info("\n" + "="*50)
+            logger.info("Computing monosemanticity metrics...")
+            logger.info("="*50)
+            
+            # Load original model for activation extraction
+            model_orig, layer_path, embedding_dim = get_model(
+                model_name=model_type, 
+                device=get_device()
+            )
+            
+            # Create ImageNet dataloader
+            dataloader, _ = create_data_loaders(
+                args.imagenet_path, 
+                num_workers=0
+            )
+            
+            # Import metrics module
+            import metrics as m
+            
+            # Compute clustering metrics
+            avg_intra, avg_inter, sep_ratio = m.compute_neuron_clustering_metric(
+                model=model_orig,
+                target_layer=layer_path,
+                val_loader=dataloader,
+                k=100,
+                patch_size=64,
+                experiment_name=model_path_name,
+                device=get_device(),
+                n_workers=4,
+                recompute_embeddings=False,
+                sae=model,  
+                return_top_patches=args.log_top_patches  
+            )
+            
+            logger.info(f"\nMonosemanticity Metrics:")
+            logger.info(f"Average Intra-cluster Distance: {avg_intra:.6f}")
+            logger.info(f"Average Inter-cluster Distance: {avg_inter:.6f}")
+            logger.info(f"Separation Ratio: {sep_ratio:.6f}")
+            
+            # Log to W&B
+            if use_wandb:
+                mono_metrics = {
+                    "expansion_f": int(int(model.n_latents)/int(model.n_inputs)),
+                    "avg_intra": float(avg_intra),
+                    "avg_inter": float(avg_inter),
+                    "sep_ratio": float(sep_ratio),
+                }
+                wandb.log(mono_metrics)
+                wandb.run.summary.update(mono_metrics)
+                
+                # Log top activating patches if requested
+                # if args.log_top_patches and top_k_patches is not None:
+                #     log_top_activating_patches(
+                #         top_k_patches,
+                #         num_neurons=args.num_neurons_to_log,
+                #         num_patches=args.num_patches_to_log
+                #     )
+            
+            # Add to final metrics for combined logging
+            final_metrics.update({
+                "avg_intra_cluster": float(avg_intra),
+                "avg_inter_cluster": float(avg_inter),
+                "separation_ratio": float(sep_ratio),
+            })
+            
+            # Cleanup
+            del model_orig, dataloader
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
+        logger.info("\n" + "="*50)
+        logger.info("Evaluation completed successfully!")
+        logger.info("="*50)
+        
+        # Create summary table
+        if use_wandb:
+            summary_data = []
+            for key, value in final_metrics.items():
+                if isinstance(value, (int, float)):
+                    summary_data.append([key, value])
+            
+            summary_table = wandb.Table(columns=["Metric", "Value"], data=summary_data)
+            wandb.log({"final_metrics_summary": summary_table})
+        
+    except Exception as e:
+        logger.error(f"Error during evaluation: {e}", exc_info=True)
+        if use_wandb:
+            wandb.finish(exit_code=1)
+        raise
     
-    # Example usage:
-
-    # Run the metric (first time - will compute and cache)
-    experiment_name = model_path_name
-    metrics = m.compute_neuron_clustering_metric(
-        model=model_orig,
-        target_layer=layer_path,
-        val_loader=dataloader,
-        k=100,
-        patch_size=64,
-        experiment_name=experiment_name,
-        save_dir="/scratch/inf0/user/dbagci/pure",
-        device='cuda',
-        sae=model,
-        min_cluster_size=5,
-        min_samples=3,
-        recompute_patches=False,
-        recompute_activations=False
-    )
-    
-    # metrics = m.compute_neuron_clustering_metric_optimized(
-    #     model=model_orig,
-    #     target_layer=layer_path,
-    #     val_loader=dataloader,
-    #     k=100,
-    #     patch_size=64,
-    #     experiment_name=experiment_name,
-    #     save_dir="/scratch/inf0/user/dbagci/pure",
-    #     device='cuda',
-    #     sae=model,
-    #     min_cluster_size=5,
-    #     min_samples=3,
-    #     recompute_patches=False,
-    #     recompute_activations=False,
-    #     clip_batch_size=100,
-    #     neurons_per_batch=5
-    # )
-
-    # # Run again - will load from cache instantly
-    # metrics = m.neuron_activation_clustering_metric(
-    #     model=model_orig,
-    #     sae=model,
-    #     target_layer=layer_path,
-    #     val_loader=dataloader,
-    #     experiment_name=experiment_name,  # Same name loads cache
-    #     use_cache=True
-    # )
-
-    
-    results = {
-         "Model Name": [args.model],
-         "Intra Score": [metrics[0]],
-         "Inter Score": [metrics[1]],
-         "Ratio": [metrics[2]]
-    }
-    
-    df = pd.DataFrame(results)
-
-    # # Append instead of overwrite
-    csv_file = "/BS/disentanglement/work/Disentanglement/MSAE/results_ms_score.csv"
-    df.to_csv(csv_file, mode="a", index=False, header=not os.path.exists(csv_file))
-    
-    # print(results)
+    finally:
+        if use_wandb:
+            wandb.finish()
 
 
 if __name__ == "__main__":

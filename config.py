@@ -93,6 +93,40 @@ class ModelConfig:
     relative_importance: Union[List[int], str] = "UW"
     max_nesting: int = 256#512
 
+@dataclasses.dataclass 
+class TCModelConfig:
+    """
+    Configuration for model parameters.
+    
+    Attributes:
+        use_matryoshka (bool): Whether to use matryoshka (nested) architecture.
+        n_inputs (int): Number of input features.
+        n_outputs (int): Number of output features.
+        n_latents (int): Number of latent dimensions.
+        activation (str): Activation function type (e.g., 'ReLU', 'TopKReLU_64').
+        tied (bool): Whether to use tied weights for encoder and decoder.
+        normalize (bool): Whether to normalize the latent representations.
+        init_method (str): Weight initialization method.
+        latent_soft_cap (float): Soft cap value for latent activations (0.0 for no cap).
+        nesting_list (list[int] | int): List of nested dimensions or single value for matryoshka networks.
+        relative_importance (list[int] | str): Relative importance weights for nested features 
+                                              ('UW' for uniform, 'RW' for linear reverse).
+        max_nesting (int): Maximum nesting level for matryoshka architecture. If `max_nesting` is lower
+                            than the `nesting_list`, we will use n_latents as the max_nesting.  
+    """
+    use_matryoshka: bool = False
+    n_inputs: int = 3072
+    n_latents: int = 1
+    n_outputs: int = 768
+    activation: str = "ReLU"
+    tied: bool = False
+    normalize: bool = False
+    init_method: str = "kaiming"
+    latent_soft_cap: float = 0.0
+    nesting_list: Union[List[int], int] = 32
+    relative_importance: Union[List[int], str] = "UW"
+    max_nesting: int = 256#512
+
 # Helper functions to create default instances
 def default_relusae_training() -> TrainConfig:
     return TrainConfig(lr=5e-5)
@@ -102,6 +136,15 @@ def default_relusae_loss() -> LossConfig:
 
 def default_relusae_model() -> ModelConfig:
     return ModelConfig(use_matryoshka=False, activation="ReLU")
+
+def default_relutc_training() -> TrainConfig:
+    return TrainConfig(lr=5e-5)
+
+def default_relutc_loss() -> LossConfig:
+    return LossConfig(sparse_loss="l1", sparse_weight=0.003)
+
+def default_relutc_model() -> TCModelConfig:
+    return TCModelConfig(use_matryoshka=False, activation="ReLU", n_outputs=768)
 
 @dataclasses.dataclass
 class ReLUSAEConfig:
@@ -123,6 +166,19 @@ def default_topksae_loss() -> LossConfig:
 
 def default_topksae_model() -> ModelConfig:
     return ModelConfig(use_matryoshka=False, activation="TopKReLU_64")
+ 
+@dataclasses.dataclass
+class ReLUTCConfig:
+    """
+    Configuration for ReLU-based Sparse Autoencoder.
+    
+    This configuration uses standard ReLU activation with L1 sparsity regularization.
+    Optimized with a relatively small learning rate (5e-5) and L1 sparsity weight of 0.03.
+    """
+    training: TrainConfig = field(default_factory=default_relutc_training)
+    loss: LossConfig = field(default_factory=default_relutc_loss)
+    model: TCModelConfig = field(default_factory=default_relutc_model)
+    
 
 @dataclasses.dataclass
 class TopKSAEConfig:
@@ -231,6 +287,8 @@ def get_config(model_name: str):
     """
     if model_name == "ReLUSAE":
         return ReLUSAEConfig()
+    elif model_name == "ReLUTC":
+        return ReLUTCConfig()
     elif model_name == "TopKSAE":
         return TopKSAEConfig()
     elif model_name == "BatchTopKSAE":

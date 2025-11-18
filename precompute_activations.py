@@ -41,6 +41,11 @@ def get_model(model_name: str, device: str):
         model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14')
         embedding_dim =1024
         layer_path="blocks.23.mlp.fc2"
+    elif model_name.lower() == "dinov2_vitb14":
+        import torch.hub
+        model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+        embedding_dim=768
+        layer_path="blocks.11.mlp.fc2"
     else:
         raise ValueError(f"Unsupported model {model_name}")
     
@@ -135,6 +140,62 @@ def extract_embeddings(model, dataloader, device, embedding_dim, save_path, laye
     memmap.flush()
     logger.info(f"Saved embeddings to {save_path}")
     return save_path
+
+
+def extract_embeddings_for_tc(model, dataloader, device, embedding_dim, save_path, layer_path, args):
+    dataset_size = len(dataloader.dataset)
+    save_path_input = save_path + "_tc_input"
+    save_path_output = save_path + "_tc_output"
+    input_memmap = np.memmap(save_path_input, dtype=np.float32, mode='w+', shape=(dataset_size, embedding_dim*4))
+    memmap = np.memmap(save_path_output, dtype=np.float32, mode='w+', shape=(dataset_size, embedding_dim))
+    idx = 0
+    
+    activations = {}
+    def get_activation():
+        def hook(model, input, output):
+            activations["input"] = input[0].detach()
+            activations["output"] = output.detach()
+        return hook
+    
+    layer = get_layer_by_path(model, layer_path)
+    model = model.to(device)
+    handle = layer.register_forward_hook(get_activation())
+    
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Extracting embeddings"):
+            if isinstance(batch, (list, tuple)):
+                imgs = batch[0] if len(batch[0].shape) == 4 else batch
+            else:
+                imgs = batch
+            
+            imgs = imgs.to(device)
+            model(imgs)
+            input_features = activations["input"]
+            output_features = activations["output"]
+            if args.model.startswith("vit") or args.model.startswith("dinov2"):
+                input_features = input_features[:, 0, :]
+                output_features = output_features[:, 0, :]
+            elif args.model.startswith("resnet"):
+                input_features = input_features.sum(dim=(2,3))
+                output_features = output_features.sum(dim=(2,3))
+            if isinstance(input_features, torch.Tensor):
+                input_features = input_features.squeeze()
+                output_features = output_features.squeeze()
+                if input_features.ndim == 1:
+                    input_features = input_features.unsqueeze(0)
+                    output_features = output_features.unsqueeze(0)
+            
+            #if args.model.startswith("dinov2"):
+            #    features = F.normalize(features, p=2, dim=1)  # L2 normalization
+            input_memmap[idx:idx + input_features.shape[0]] = input_features.detach().cpu().numpy()
+            memmap[idx:idx + output_features.shape[0]] = output_features.detach().cpu().numpy()
+            idx += input_features.shape[0]
+    
+    input_memmap.flush()
+    memmap.flush()
+    logger.info(f"Saved embeddings to {save_path_input} and {save_path_output}")
+    return save_path_input, save_path_output
+
 
 
 def extract_embeddings_and_labels(model, dataloader, device, embedding_dim, save_path, 
@@ -256,11 +317,12 @@ def main(args):
         raise ValueError(f"Unsupported dataset {args.dataset}")
     
     os.makedirs(args.save_dir, exist_ok=True)
-    save_path = os.path.join(args.save_dir, f"sae/{args.dataset}_{args.model}_embeddings_{args.split}.npy")
+    save_path = os.path.join(args.save_dir, f"tc/{args.dataset}_{args.model}_embeddings_{args.split}.npy")
     labels_save_path = os.path.join(args.save_dir, f"sae/{args.dataset}_{args.model}_labels_{args.split}.npy")
     
     
-    extract_embeddings(model, loader, device, embedding_dim, save_path, layer_path=layer_path, args=args)
+    #extract_embeddings(model, loader, device, embedding_dim, save_path, layer_path=layer_path, args=args)
+    extract_embeddings_for_tc(model, loader, device, embedding_dim, save_path, layer_path=layer_path, args=args)
     #extract_embeddings_and_labels(model=model, dataloader=loader, device=device, embedding_dim=embedding_dim, save_path=save_path, label_save_path=labels_save_path, layer_path=layer_path, args=args, dataset="imagenet")
 
 # -----------------------------

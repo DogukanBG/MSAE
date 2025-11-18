@@ -80,6 +80,85 @@ class SAELoss(torch.nn.Module):
         """Human-readable string representation."""
         return f"{self.reconstruction_loss}_{self.sparse_loss}_{self.sparse_weight}"
 
+
+class TCLoss(torch.nn.Module):
+    """
+    Combined loss function for Sparse Autoencoders (SAE).
+    
+    Combines a reconstruction loss term with a sparsity-inducing regularization term.
+    The reconstruction loss measures how well the autoencoder reconstructs its inputs,
+    while the sparsity loss encourages sparse activations in the latent space.
+    
+    Attributes:
+        reconstruction_loss (str): Name of the reconstruction loss function.
+        reconstruction_loss_fn (callable): Function for computing reconstruction loss.
+        sparse_loss (str): Name of the sparsity loss function.
+        sparse_loss_fn (callable): Function for computing sparsity loss.
+        sparse_weight (float): Coefficient for the sparsity loss term.
+        mean_input (torch.Tensor, optional): Mean input vector used for normalization.
+    """
+    
+    def __init__(
+        self,
+        reconstruction_loss: str = "mse",
+        sparse_loss: str = "l1",
+        sparse_weight: float = 0.0,
+        mean_input: torch.Tensor = None,
+    ):
+        """
+        Initialize the SAE loss function.
+        
+        Args:
+            reconstruction_loss (str): Type of reconstruction loss ("mse" or "cosine").
+            sparse_loss (str): Type of sparsity regularization ("l1", "l0", or "tanh").
+            sparse_weight (float): Weight coefficient for the sparsity loss term.
+            mean_input (torch.Tensor, optional): Mean input vector used for normalization
+                                                in certain loss functions.
+        """
+        super().__init__()
+        self.reconstruction_loss = reconstruction_loss
+        self.reconstruction_loss_fn = get_recon_loss_fn(reconstruction_loss)
+        self.sparse_loss = sparse_loss
+        self.sparse_loss_fn = get_sparse_loss_fn(sparse_loss)
+        self.sparse_weight = sparse_weight
+        self.mean_input = mean_input
+
+    def forward(
+        self,
+        reconstruction: torch.Tensor,
+        original_output: torch.Tensor,
+        latent_activations: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Compute the combined loss for the sparse autoencoder.
+        
+        Args:
+            reconstruction: Output of Autoencoder.decode (shape: [batch, n_inputs])
+            original_input: Input of Autoencoder.encode (shape: [batch, n_inputs])
+            latent_activations: Output of Autoencoder.encode (shape: [batch, n_latents])
+        
+        Returns:
+            tuple: (total_loss, reconstruction_loss, sparsity_loss)
+                - total_loss: Combined weighted loss
+                - reconstruction_loss: Loss measuring reconstruction quality
+                - sparsity_loss: Loss measuring latent space sparsity
+        """
+        recon_loss = self.reconstruction_loss_fn(reconstruction, original_output, self.mean_input)
+        sparse_loss = self.sparse_loss_fn(latent_activations, reconstruction)
+        return (
+            recon_loss + self.sparse_weight * sparse_loss,
+            recon_loss,
+            sparse_loss
+        )
+    
+    def __repr__(self):
+        """String representation for debugging."""
+        return f"TCLoss(reconstruction_loss={self.reconstruction_loss}, sparse_loss={self.sparse_loss}, sparse_weight={self.sparse_weight})"
+    
+    def __str__(self):
+        """Human-readable string representation."""
+        return f"{self.reconstruction_loss}_{self.sparse_loss}_{self.sparse_weight}"
+
 #TODO: Implement Loss Function
 #TODO: Implement Flexible AutoEncoder
 class BCOSLoss(torch.nn.Module):
@@ -300,7 +379,7 @@ SIMILARITY_LOSS = {
     "cos_sim": cosine_similarity
 }
 
-def get_sparse_loss_fn(sim_loss: str) -> callable:
+def get_sim_loss_fn(sim_loss: str) -> callable:
     return SIMILARITY_LOSS[sim_loss]
 
 def get_recon_loss_fn(recon_loss: str) -> callable:

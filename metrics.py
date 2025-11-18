@@ -139,11 +139,11 @@ def cknna(feats_A: torch.Tensor, feats_B: torch.Tensor, topk: int = 10,
     """
     n = feats_A.shape[0]
             
-    if topk < 2:
-        raise ValueError("CKNNA requires topk >= 2")
-    
     if topk is None:
         topk = feats_A.shape[0] - 1
+        
+    if topk < 2:
+        raise ValueError("CKNNA requires topk >= 2")
                         
     # Compute kernel matrices (linear kernels)
     K = feats_A @ feats_A.T
@@ -403,327 +403,19 @@ def monosemanticity_score_concept(experiment_name, model, sae, target_layer, val
     """
     return
 
-import gc
-def monosemanticity_score(experiment_name, model, sae, target_layer, val_loader, device='cuda'):
-    """
-    Compute monosemanticity score for neural network features.
-    
-    Args:
-        experiment_name: Name for saving/loading cached files
-        model: Neural network model to analyze
-        sae: Sparse autoencoder (optional, can be None)
-        target_layer: Layer name to hook for activation extraction
-        val_loader: DataLoader for validation images
-        feature_extractor: Name of feature extractor (e.g., "dinov2_b")
-        device: Device to run computations on
-    
-    Returns:
-        Average monosemanticity score across all channels
-    """
-    
-    # Create directory for cached files
-    cache_dir = Path(f"/BS/disentanglement/work/ms_score/")
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    
-    embeddings_path = cache_dir / f"embeddings_dinov2.pt"
-    activations_path = cache_dir / f"{experiment_name}_activations_{target_layer}.pt"
-    
-    # Extract or load DINOv2 embeddings (for similarity computation)
-    if embeddings_path.exists():
-        print("Loading cached DINOv2 embeddings...")
-        embeddings = torch.load(embeddings_path)
-    else:
-        print("Computing DINOv2 embeddings...")
-        embeddings = compute_dinov2_embeddings(val_loader, device)
-        torch.save(embeddings, embeddings_path)
-        print(f"Saved embeddings to {embeddings_path}")
-    
-    # Extract or load activations from target layer
-    if activations_path.exists():
-        print("Loading cached activations...")
-        activations = torch.load(activations_path)
-    else:
-        print("Extracting latent activations...")
-        activations = extract_latents(model, sae, target_layer, val_loader, device)
-        torch.save(activations, activations_path)
-        print(f"Saved activations to {activations_path}")
-    
-    torch.cuda.empty_cache()
-    gc.collect()
-    
-    print("Computing monosemanticity scores...")
-    print(f"Embeddings shape: {embeddings.shape}")
-    print(f"Activations shape: {activations.shape}")
-    
-    num_images, embed_dim = embeddings.shape
-    num_neurons = activations.shape[1]
-    
-    # Normalize embeddings for cosine similarity
-    embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
-    
-    # Scale activations to 0-1 per neuron
-    min_values = activations.min(dim=0, keepdim=True)[0]
-    max_values = activations.max(dim=0, keepdim=True)[0]
-    activations = (activations - min_values) / (max_values - min_values + 1e-8)
-    
-    # Move to CPU for computation
-    # embeddings = embeddings.cpu()
-    # activations = activations.cpu()
-    
-    # # Initialize accumulators
-    # weighted_cosine_similarity_sum = torch.zeros(num_neurons)
-    # weight_sum = torch.zeros(num_neurons)
-    # batch_size = 50000  # Process pairs in batches
-    
-    # for i in tqdm(range(num_images), desc="Processing image pairs"):
-    #     for j_start in range(i + 1, num_images, batch_size):
-    #         j_end = min(j_start + batch_size, num_images)
-            
-    #         embeddings_i = embeddings[i].to(device)  # (embed_dim)
-    #         embeddings_j = embeddings[j_start:j_end].to(device)  # (batch_size, embed_dim)
-    #         activations_i = activations[i].to(device)  # (num_neurons)
-    #         activations_j = activations[j_start:j_end].to(device)  # (batch_size, num_neurons)
-            
-    #         # Compute cosine similarity between embeddings
-    #         cosine_similarities = F.cosine_similarity(
-    #             embeddings_i.unsqueeze(0).expand(j_end - j_start, -1),
-    #             embeddings_j,
-    #             dim=1
-    #         )  # (batch_size,)
-            
-    #         # Compute weights from activations
-    #         weights = activations_i.unsqueeze(0) * activations_j  # (batch_size, num_neurons)
-            
-    #         # Weight similarities by activation products
-    #         weighted_cosine_similarities = weights * cosine_similarities.unsqueeze(1)  # (batch_size, num_neurons)
-            
-    #         # Accumulate
-    #         weighted_cosine_similarity_sum += weighted_cosine_similarities.sum(dim=0).cpu()
-    #         weight_sum += weights.sum(dim=0).cpu()
-    
-    # # Compute final monosemanticity scores
-    # monosemanticity = torch.where(weight_sum != 0, weighted_cosine_similarity_sum / weight_sum, torch.nan)
-    embeddings = embeddings.to(device)
-    activations = activations.to(device)
 
-    # Normalize embeddings once
-    embeddings_norm = F.normalize(embeddings, p=2, dim=1)  # (num_images, embed_dim)
-
-    # Initialize accumulators
-    weighted_cosine_similarity_sum = torch.zeros(num_neurons, device=device)
-    weight_sum = torch.zeros(num_neurons, device=device)
-
-    chunk_size = 100  # Adjust based on GPU memory
-
-    for i_start in tqdm(range(0, num_images, chunk_size), desc="Processing chunks"):
-        i_end = min(i_start + chunk_size, num_images)
-        
-        # Get chunk of embeddings and activations
-        emb_chunk = embeddings_norm[i_start:i_end]  # (chunk_size, embed_dim)
-        act_chunk = activations[i_start:i_end]  # (chunk_size, num_neurons)
-        
-        # Only compute with images that come AFTER this chunk (j > i)
-        for j_start in range(i_end, num_images, chunk_size):
-            j_end = min(j_start + chunk_size, num_images)
-            
-            emb_j = embeddings_norm[j_start:j_end]  # (chunk_j, embed_dim)
-            act_j = activations[j_start:j_end]  # (chunk_j, num_neurons)
-            
-            # Compute cosine similarities for all pairs in chunks
-            cosine_sims = emb_chunk @ emb_j.T  # (chunk_i, chunk_j)
-            
-            # Compute activation products
-            # act_chunk: (chunk_i, num_neurons) -> (chunk_i, 1, num_neurons)
-            # act_j: (chunk_j, num_neurons) -> (1, chunk_j, num_neurons)
-            act_products = act_chunk.unsqueeze(1) * act_j.unsqueeze(0)  # (chunk_i, chunk_j, num_neurons)
-            
-            # Weight similarities
-            weighted_sims = act_products * cosine_sims.unsqueeze(2)  # (chunk_i, chunk_j, num_neurons)
-            
-            # Accumulate
-            weighted_cosine_similarity_sum += weighted_sims.sum(dim=(0, 1))
-            weight_sum += act_products.sum(dim=(0, 1))
-        
-        # Handle pairs within the same chunk (i < j within chunk)
-        if i_end - i_start > 1:
-            cosine_sims = emb_chunk @ emb_chunk.T  # (chunk_size, chunk_size)
-            act_products = act_chunk.unsqueeze(1) * act_chunk.unsqueeze(0)  # (chunk_size, chunk_size, num_neurons)
-            
-            # Create upper triangle mask (exclude diagonal)
-            mask = torch.triu(torch.ones(i_end - i_start, i_end - i_start, device=device), diagonal=1)
-            mask = mask.unsqueeze(2)  # (chunk_size, chunk_size, 1)
-            
-            weighted_sims = act_products * cosine_sims.unsqueeze(2) * mask
-            
-            weighted_cosine_similarity_sum += weighted_sims.sum(dim=(0, 1))
-            weight_sum += (act_products * mask).sum(dim=(0, 1))
-
-    # Compute final scores
-    monosemanticity = torch.where(weight_sum != 0, weighted_cosine_similarity_sum / weight_sum, torch.nan)
-                    #weighted_cosine_similarity_sum / (num_images * (num_images - 1) / 2) 
-    monosemanticity = monosemanticity.cpu()
-
-    monosemanticity_with_dead_neurons = weighted_cosine_similarity_sum / (num_images * (num_images - 1) / 2) 
-    
-    # Save results
-    output_dir = Path(f"/BS/disentanglement/work/Disentanglement/MSAE/ms_scores/")
-    
-    output_dir.mkdir(parents=True, exist_ok=True)
-    # torch.save(monosemanticity, output_dir / "all_neurons_scores.pth")
-    
-    # Compute statistics
-    is_nan = torch.isnan(monosemanticity)
-    nan_count = is_nan.sum()
-    monosemanticity_mean = torch.mean(monosemanticity[~is_nan])
-    monosemanticity_mean_with_dead_neurons_mean = torch.mean(monosemanticity_with_dead_neurons[~is_nan])
-    monosemanticity_std = torch.std(monosemanticity[~is_nan])
-    
-    print(f"\nMonosemanticity: {monosemanticity_mean.item():.6f} +- {monosemanticity_std.item():.6f}")
-    print(f"\nMonosemanticity with Dead Neurons: {monosemanticity_mean_with_dead_neurons_mean.item():.6f}")
-    print(f"Dead neurons: {nan_count.item()}")
-    print(f"Total neurons: {num_neurons}")
-    
-    # Save results
-    output_dir = Path(f"/BS/disentanglement/work/Disentanglement/MSAE/ms_scores/")
-    
-    output_dir.mkdir(parents=True, exist_ok=True)
-    # torch.save(monosemanticity, output_dir / "all_neurons_scores.pth")
-    
-    
-    # Filter out NaNs for ranking
-    valid_indices = ~torch.isnan(monosemanticity)
-    valid_monosemanticity = monosemanticity[valid_indices]
-    valid_indices = torch.nonzero(valid_indices).squeeze()
-    
-    # Get top 10 highest and lowest monosemantic neurons
-    top_10_values, top_10_indices = torch.topk(valid_monosemanticity, min(10, len(valid_monosemanticity)))
-    bottom_10_values, bottom_10_indices = torch.topk(valid_monosemanticity, min(10, len(valid_monosemanticity)), largest=False)
-    
-    # Map indices back to original positions
-    top_10_indices = valid_indices[top_10_indices]
-    bottom_10_indices = valid_indices[bottom_10_indices]
-    
-    # Print results
-    print("\nTop 10 most monosemantic neurons:")
-    for i, (idx, val) in enumerate(zip(top_10_indices, top_10_values)):
-         print(f"{i + 1}. Neuron {idx.item()} - {val.item():.6f}")
-    
-    print("\nBottom 10 least monosemantic neurons:")
-    for i, (idx, val) in enumerate(zip(bottom_10_indices, bottom_10_values)):
-        print(f"{i + 1}. Neuron {idx.item()} - {val.item():.6f}")
-    
-    # # Save to file
-    output_path = output_dir / f"{experiment_name}_metric_stats.txt"
-    with open(output_path, "w") as file:
-        file.write(f"Monosemanticity: {monosemanticity_mean.item():.6f} +- {monosemanticity_std.item():.6f}\n")
-        file.write(f"Monosemanticity with Dead Neurons: {monosemanticity_mean_with_dead_neurons_mean.item():.6f}\n")
-        file.write(f"Dead neurons: {nan_count.item()}\n")
-        file.write(f"Total neurons: {num_neurons}\n\n")
-        
-        file.write("Top 10 most monosemantic neurons:\n")
-        for idx, val in zip(top_10_indices, top_10_values):
-            file.write(f"Neuron {idx.item()} - {val.item():.6f}\n")
-        
-        file.write("\nBottom 10 least monosemantic neurons:\n")
-        for idx, val in zip(bottom_10_indices, bottom_10_values):
-            file.write(f"Neuron {idx.item()} - {val.item():.6f}\n")
-    
-    # print(f"\nResults saved to {output_path}")
-    
-    return monosemanticity_mean.item()
-
-
-def compute_dinov2_embeddings(val_loader, device='cuda'):
-    """
-    Compute DINOv2 embeddings for all images.
-    Returns normalized embeddings ready for cosine similarity.
-    """
-    # Load DINOv2 model
-    dinov2_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
-    dinov2_model = dinov2_model.to(device)
-    dinov2_model.eval()
-    
-    all_embeddings = []
-    
-    with torch.no_grad():
-        for images, _ in tqdm(val_loader, desc="Extracting DINOv2 embeddings"):
-            images = images.to(device)
-            embeddings = dinov2_model(images)  # Shape: (batch_size, embed_dim)
-            all_embeddings.append(embeddings.cpu())
-    
-    # Concatenate all embeddings
-    all_embeddings = torch.cat(all_embeddings, dim=0)  # Shape: (num_images, embed_dim)
-    
-    # Clean up
-    dinov2_model = dinov2_model.to("cpu")
-    del dinov2_model
-    torch.cuda.empty_cache()
-    
-    return all_embeddings
-
-
-def extract_latents(model, sae, target_layer, val_loader, device='cuda'):
-    """
-    Extract latent activations from target layer, optionally passing through SAE.
-    Returns raw activations (scaling done later).
-    """
-    activations = {}
-    
-    def hook_fn(module, input, output):
-        activations["output"] = output.detach()
-    
-    # Register hook on target layer
-    layer = get_layer_by_path(model, target_layer)
-    hook_handle = layer.register_forward_hook(hook_fn)
-    
-    model = model.to(device)
-    model.eval()
-    
-    if sae is not None:
-        sae = sae.to(device)
-        sae.eval()
-    
-    all_latents = []
-    
-    with torch.no_grad():
-        for images, _ in tqdm(val_loader, desc="Extracting latents"):
-            images = images.to(device)
-            
-            # Forward pass to capture activations
-            _ = model(images)
-            latent_acts = activations["output"]
-            
-            # Handle different activation shapes
-            if latent_acts.dim() == 4:  # Conv layer: (B, C, H, W)
-                latent_acts = latent_acts.sum(dim=(2, 3))
-            elif latent_acts.dim() == 3:  # Transformer: (B, T, C)
-                latent_acts = latent_acts[:, 0, :]  # Take CLS token
-            
-            # Pass through SAE if provided
-            if sae is not None:
-                sparse_outputs, latent_acts, outputs, representations = sae(latent_acts)
-            
-            all_latents.append(latent_acts.cpu())
-    
-    # Remove hook
-    hook_handle.remove()
-    
-    # Stack all latents
-    all_latents = torch.cat(all_latents, dim=0)  # Shape: (num_images, num_channels)
-    
-    return all_latents
 import torch
-import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
 import numpy as np
+from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
-from tqdm import tqdm
 import pickle
-from sklearn.metrics import pairwise_distances
-import clip
-from PIL import Image
 import json
+import gc
+from tqdm import tqdm
+from sklearn.cluster import KMeans
+from sklearn.metrics.pairwise import cosine_distances
+import torchvision.transforms as transforms
+import clip
 
 
 class PatchDataset(Dataset):
@@ -756,16 +448,6 @@ def extract_patches_from_imagenet(val_loader, patch_size=16, save_dir=None, devi
     """
     Extract all patches from ImageNet validation dataset.
     This is model-independent and only needs to be computed once.
-    
-    Args:
-        val_loader: DataLoader for ImageNet validation set
-        patch_size: Size of square patches to extract
-        save_dir: Directory to save/load patches from
-        device: Device to use for processing
-    
-    Returns:
-        patches: List of PIL Images (patches)
-        metadata: Dict with patch metadata (original image idx, position)
     """
     if save_dir is not None:
         save_dir = Path(save_dir)
@@ -801,7 +483,7 @@ def extract_patches_from_imagenet(val_loader, patch_size=16, save_dir=None, devi
                     w_start = j * patch_size
                     patch = img[:, h_start:h_start+patch_size, w_start:w_start+patch_size]
                     
-                    # Convert to PIL Image for saving/loading
+                    # Convert to PIL Image
                     patch_pil = transforms.ToPILImage()(patch)
                     all_patches.append(patch_pil)
                     
@@ -825,14 +507,12 @@ def extract_patches_from_imagenet(val_loader, patch_size=16, save_dir=None, devi
     
     return all_patches, metadata
 
+
 def extract_patch_activations(model, patches, patch_metadata, target_layer, experiment_name,
-                              batch_size=256, device='cuda', sae=None):
+                              batch_size=64, device='cuda', sae=None):
     """
     Extract activations for all patches through the target layer.
-    Returns path to memmap file instead of loading all activations.
-    
-    Returns:
-        mmap_info: Dict with {'path': mmap_file, 'shape': (num_patches, num_neurons), 'dtype': 'float32'}
+    Returns memmap info dict instead of loading all activations.
     """
     # Create dataset and dataloader
     transform = transforms.Compose([
@@ -913,8 +593,9 @@ def extract_patch_activations(model, patches, patch_metadata, target_layer, expe
             activations_mmap[current_idx:current_idx+batch_size_actual] = latent_acts.cpu().numpy()
             current_idx += batch_size_actual
             
-            # Free GPU memory
-            del latent_acts
+            # Explicit cleanup
+            del latent_acts, patch_batch
+            activations_dict.clear()
             if device == 'cuda':
                 torch.cuda.empty_cache()
     
@@ -923,6 +604,7 @@ def extract_patch_activations(model, patches, patch_metadata, target_layer, expe
     # Flush to disk
     activations_mmap.flush()
     del activations_mmap
+    gc.collect()
     
     # Return metadata instead of loading all data
     return {
@@ -937,21 +619,11 @@ def get_top_k_patches_per_neuron(mmap_info, patches, k=100,
     """
     For each neuron, find the top-k most activating patches.
     Memory-efficient version that processes one neuron at a time.
-    
-    Args:
-        mmap_info: Dict with memmap file info from extract_patch_activations
-        patches: List of PIL Image patches
-        k: Number of top patches to keep per neuron
-        save_dir: Directory to save top-k patches
-        experiment_name: Name of experiment for organizing files
-    
-    Returns:
-        top_k_patches_per_neuron: Dict mapping neuron_idx -> list of PIL Images
     """
     if save_dir is None:
         save_dir = Path(f"/scratch/inf0/user/dbagci/pure/{experiment_name}")
     else:
-        save_dir = Path(f"/scratch/inf0/user/dbagci/pure/{experiment_name}")
+        save_dir = Path(save_dir)
     
     save_dir.mkdir(parents=True, exist_ok=True)
     top_k_file = save_dir / f"{experiment_name}_top_{k}_patches_per_neuron.pkl"
@@ -970,9 +642,8 @@ def get_top_k_patches_per_neuron(mmap_info, patches, k=100,
     print(f"Finding top-{k} patches per neuron...")
     top_k_patches_per_neuron = {}
     
-    # Process one neuron at a time - only loads one column into memory
+    # Process one neuron at a time
     for neuron_idx in tqdm(range(num_neurons), desc="Processing neurons"):
-        # Load activations for this neuron only (shape: num_patches)
         neuron_activations = torch.from_numpy(activations_mmap[:, neuron_idx].copy())
         
         # Get top-k indices
@@ -982,11 +653,11 @@ def get_top_k_patches_per_neuron(mmap_info, patches, k=100,
         top_patches = [patches[idx] for idx in top_k_indices.numpy()]
         top_k_patches_per_neuron[neuron_idx] = top_patches
         
-        # Free memory
         del neuron_activations
     
     # Clean up memmap
     del activations_mmap
+    gc.collect()
     
     # Save
     print(f"Saving top-k patches to {top_k_file}")
@@ -996,62 +667,97 @@ def get_top_k_patches_per_neuron(mmap_info, patches, k=100,
     return top_k_patches_per_neuron
 
 
-def compute_clip_embeddings(patches, device='cuda', batch_size=100):
+def compute_all_clip_embeddings_batched(top_k_patches_dict, device='cuda', batch_size=64, 
+                                        save_dir=None, experiment_name="default"):
     """
-    Compute CLIP embeddings for a list of patches.
-    
-    Args:
-        patches: List of PIL Images
-        device: Device to use
-        batch_size: Batch size for CLIP encoding
-    
-    Returns:
-        embeddings: Tensor of shape (num_patches, clip_dim)
+    Compute CLIP embeddings for all neurons' patches in batched fashion.
+    Saves embeddings per neuron immediately to avoid memory issues.
     """
+    if save_dir is None:
+        save_dir = Path(f"/scratch/inf0/user/dbagci/pure/{experiment_name}")
+    else:
+        save_dir = Path(save_dir)
+    
+    save_dir.mkdir(parents=True, exist_ok=True)
+    embeddings_file = save_dir / f"{experiment_name}_clip_embeddings.pkl"
+    
+    # Load if exists
+    if embeddings_file.exists():
+        print(f"Loading cached CLIP embeddings from {embeddings_file}")
+        with open(embeddings_file, 'rb') as f:
+            return pickle.load(f)
+    
+    print("Computing CLIP embeddings (batched)...")
+    
     # Load CLIP model
     clip_model, preprocess = clip.load("ViT-B/16", device=device)
     clip_model.eval()
     
-    all_embeddings = []
+    embeddings_per_neuron = {}
     
-    with torch.no_grad():
-        for i in range(0, len(patches), batch_size):
-            batch_patches = patches[i:i+batch_size]
-            
-            # Preprocess patches
-            batch_tensors = torch.stack([preprocess(patch) for patch in batch_patches])
-            batch_tensors = batch_tensors.to(device)
-            
-            # Encode with CLIP
-            embeddings = clip_model.encode_image(batch_tensors)
-            embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)  # Normalize
-            
-            all_embeddings.append(embeddings.cpu())
+    # Process each neuron separately
+    for neuron_idx in tqdm(sorted(top_k_patches_dict.keys()), desc="Computing embeddings per neuron"):
+        patches = top_k_patches_dict[neuron_idx]
+        neuron_embeddings = []
+        
+        with torch.no_grad():
+            for i in range(0, len(patches), batch_size):
+                batch = patches[i:i+batch_size]
+                batch_tensors = torch.stack([preprocess(p) for p in batch]).to(device)
+                embeddings = clip_model.encode_image(batch_tensors)
+                embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
+                neuron_embeddings.append(embeddings.cpu())
+                
+                del batch_tensors, embeddings
+                if device == 'cuda':
+                    torch.cuda.empty_cache()
+        
+        embeddings_per_neuron[neuron_idx] = torch.cat(neuron_embeddings, dim=0)
+        del neuron_embeddings
+        gc.collect()
     
-    return torch.cat(all_embeddings, dim=0)
+    # Save embeddings
+    print(f"Saving CLIP embeddings to {embeddings_file}")
+    with open(embeddings_file, 'wb') as f:
+        pickle.dump(embeddings_per_neuron, f)
+    
+    # Cleanup
+    del clip_model
+    if device == 'cuda':
+        torch.cuda.empty_cache()
+    gc.collect()
+    
+    return embeddings_per_neuron
 
+from hdbscan import HDBSCAN
 
-def compute_clustering_metrics(embeddings, min_cluster_size=5, min_samples=3):
+def compute_clustering_metrics_cosine(embeddings, k=3):
     """
-    Cluster embeddings using K-Means and compute intra/inter-cluster distances.
-    
-    Args:
-        embeddings: Tensor of shape (num_samples, embedding_dim)
-        k: Number of clusters for K-Means (default: 3)
-    
-    Returns:
-        metrics: Dict with intra_cluster_dist, inter_cluster_dist, num_clusters, cluster_sizes
+    Cluster embeddings using HDBSCAN with cosine similarity.
     """
-    # Normalize embeddings to unit length
-    k = 3
+    # Normalize embeddings
     embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
     embeddings_np = embeddings.numpy()
-    
     num_samples = embeddings_np.shape[0]
     
-    # Check if we have enough samples
-    print("Embeddings Shape", embeddings_np.shape)
-    if num_samples < k:
+    # if num_samples < min_cluster_size:
+    #     return {
+    #         'intra_cluster_dist': None,
+    #         'inter_cluster_dist': None,
+    #         'num_clusters': 0,
+    #         'cluster_sizes': [],
+    #         'valid': False
+    #     }
+    
+    clusterer = HDBSCAN()
+    cluster_labels = clusterer.fit_predict(embeddings_np)
+    
+    # Filter out noise points (label -1)
+    valid_mask = cluster_labels != -1
+    valid_labels = cluster_labels[valid_mask]
+    valid_embeddings = embeddings_np[valid_mask]
+    
+    if len(valid_labels) == 0:
         return {
             'intra_cluster_dist': None,
             'inter_cluster_dist': None,
@@ -1060,19 +766,10 @@ def compute_clustering_metrics(embeddings, min_cluster_size=5, min_samples=3):
             'valid': False
         }
     
-    # Perform K-Means clustering
-    from sklearn.cluster import KMeans
-    
-    kmeans = KMeans(n_clusters=k, random_state=42)
-    cluster_labels = kmeans.fit_predict(embeddings_np)
-    cluster_centers = kmeans.cluster_centers_
-    
-    # Count samples in each cluster
-    unique_clusters, cluster_counts = np.unique(cluster_labels, return_counts=True)
+    unique_clusters, cluster_counts = np.unique(valid_labels, return_counts=True)
     num_clusters = len(unique_clusters)
     
     if num_clusters < 2:
-        # This shouldn't happen with K-Means, but check anyway
         return {
             'intra_cluster_dist': None,
             'inter_cluster_dist': None,
@@ -1081,28 +778,36 @@ def compute_clustering_metrics(embeddings, min_cluster_size=5, min_samples=3):
             'valid': False
         }
     
-    # Compute pairwise distances
-    distances = pairwise_distances(embeddings_np, metric='euclidean')
+    # Compute cluster centers (mean of normalized vectors)
+    cluster_centers = []
+    for cluster_id in unique_clusters:
+        cluster_mask = valid_labels == cluster_id
+        cluster_points = valid_embeddings[cluster_mask]
+        center = np.mean(cluster_points, axis=0)
+        # Normalize center
+        center = center / np.linalg.norm(center)
+        cluster_centers.append(center)
+    cluster_centers = np.array(cluster_centers)
     
-    # Compute intra-cluster distances (average distance within each cluster)
+    # Compute cosine distances
+    distances = cosine_distances(valid_embeddings)
+    
+    # Intra-cluster distances
     intra_cluster_dists = []
     for cluster_id in unique_clusters:
-        cluster_mask = cluster_labels == cluster_id
+        cluster_mask = valid_labels == cluster_id
         cluster_indices = np.where(cluster_mask)[0]
-        
         if len(cluster_indices) > 1:
-            # Get distances within this cluster
             cluster_dists = distances[np.ix_(cluster_indices, cluster_indices)]
-            # Take upper triangle (excluding diagonal)
             triu_indices = np.triu_indices_from(cluster_dists, k=1)
             intra_dists = cluster_dists[triu_indices]
             intra_cluster_dists.extend(intra_dists)
     
     avg_intra_cluster_dist = np.mean(intra_cluster_dists) if intra_cluster_dists else None
     
-    # Compute inter-cluster distances (average distance between cluster centroids)
+    # Inter-cluster distances
     if len(cluster_centers) > 1:
-        centroid_distances = pairwise_distances(cluster_centers, metric='euclidean')
+        centroid_distances = cosine_distances(cluster_centers)
         triu_indices = np.triu_indices_from(centroid_distances, k=1)
         inter_cluster_dists = centroid_distances[triu_indices]
         avg_inter_cluster_dist = np.mean(inter_cluster_dists)
@@ -1118,6 +823,25 @@ def compute_clustering_metrics(embeddings, min_cluster_size=5, min_samples=3):
     }
 
 
+def compute_metrics_sequential(embeddings_per_neuron, k=3, min_cluster_size=5):
+    """
+    Sequential processing of clustering metrics to avoid memory issues.
+    """
+    per_neuron_results = {}
+    
+    for neuron_idx, embeddings in tqdm(embeddings_per_neuron.items(), desc="Clustering neurons"):
+        metrics = compute_clustering_metrics_cosine(
+            embeddings, 
+            k=k
+        )
+        per_neuron_results[neuron_idx] = metrics
+        
+        del embeddings
+        gc.collect()
+    
+    return per_neuron_results
+
+
 def compute_neuron_clustering_metric(
     model,
     target_layer,
@@ -1131,28 +855,19 @@ def compute_neuron_clustering_metric(
     min_cluster_size=5,
     min_samples=3,
     recompute_patches=False,
-    recompute_activations=False
+    recompute_activations=False,
+    recompute_embeddings=False,
+    return_top_patches=False,
+    n_workers=4
 ):
     """
-    Main function to compute the clustering metric for all neurons in a layer.
-    
-    Args:
-        model: Neural network model
-        target_layer: Layer path to analyze
-        val_loader: DataLoader for ImageNet validation set
-        k: Number of top activating patches per neuron
-        patch_size: Size of patches to extract
-        experiment_name: Name for organizing cached files
-        save_dir: Directory to save results
-        device: Device to use
-        sae: Optional SAE to pass activations through
-        min_cluster_size: HDBSCAN parameter
-        min_samples: HDBSCAN parameter
-        recompute_patches: Force recompute patches
-        recompute_activations: Force recompute activations
+    Main function to compute the clustering metric for all neurons.
     
     Returns:
-        results: Dict with average metrics and per-neuron results
+        avg_intra: Average intra-cluster distance
+        avg_inter: Average inter-cluster distance
+        sep_ratio: Separation ratio (inter/intra)
+        top_k_patches: (Optional) Dictionary of top patches per neuron
     """
     if save_dir is None:
         save_dir = Path(f"/scratch/inf0/user/dbagci/pure/{experiment_name}")
@@ -1161,178 +876,12 @@ def compute_neuron_clustering_metric(
     
     save_dir.mkdir(parents=True, exist_ok=True)
     
-    # Step 1: Extract patches from ImageNet (model-independent)
-    patch_cache_dir = Path("/scratch/inf0/user/dbagci/pure") #save_dir / "patches"
-    if recompute_patches:
-        import shutil
-        if patch_cache_dir.exists():
-            shutil.rmtree(patch_cache_dir)
-    
-    patches, patch_metadata = extract_patches_from_imagenet(
-        val_loader, 
-        patch_size=patch_size, 
-        save_dir=patch_cache_dir,
-        device=device
-    )
-    
-    # Step 2: Extract activations for all patches (model-dependent)
-    activation_file = save_dir / f"{experiment_name}_patch_activations_{target_layer.replace('.', '_')}.pt"
-    
-    if recompute_activations or not activation_file.exists():
-        print("Computing patch activations...")
-        activations = extract_patch_activations(
-            model, patches, patch_metadata, target_layer,
-            device=device, sae=sae, experiment_name=experiment_name
-        )
-        torch.save(activations, activation_file)
-    else:
-        print(f"Loading cached activations from {activation_file}")
-        activations = torch.load(activation_file)
-    
-    # Step 3: Get top-k patches per neuron
-    top_k_patches = get_top_k_patches_per_neuron(
-        activations, patches, k=k, 
-        save_dir=save_dir, 
-        experiment_name=experiment_name
-    )
-    
-    # Step 4: For each neuron, compute CLIP embeddings and clustering metrics
-    print("Computing clustering metrics per neuron...")
-    num_neurons = len(top_k_patches)
-    
-    # Setup checkpointing
-    checkpoint_file = save_dir / f"{experiment_name}_neuron_analysis_checkpoint.pkl"
-    checkpoint_interval = 100  # Save every 100 neurons
-    
-    # Load existing checkpoint if available
-    if checkpoint_file.exists():
-        print(f"Loading checkpoint from {checkpoint_file}")
-        with open(checkpoint_file, 'rb') as f:
-            checkpoint = pickle.load(f)
-        per_neuron_results = checkpoint['per_neuron_results']
-        start_neuron = checkpoint['last_completed_neuron'] + 1
-        print(f"Resuming from neuron {start_neuron}/{num_neurons}")
-    else:
-        per_neuron_results = {}
-        start_neuron = 0
-    
-    valid_intra_dists = []
-    valid_inter_dists = []
-    
-    for neuron_idx in tqdm(range(start_neuron, num_neurons), desc="Analyzing neurons", initial=start_neuron, total=num_neurons):
-        neuron_patches = top_k_patches[neuron_idx]
-        
-        # Compute CLIP embeddings
-        embeddings = compute_clip_embeddings(neuron_patches, device=device)
-        
-        # Compute clustering metrics
-        metrics = compute_clustering_metrics(
-            embeddings, 
-            min_cluster_size=min_cluster_size,
-            min_samples=min_samples
-        )
-        
-        per_neuron_results[neuron_idx] = metrics
-        
-        # Save checkpoint periodically
-        if (neuron_idx + 1) % checkpoint_interval == 0:
-            checkpoint = {
-                'per_neuron_results': per_neuron_results,
-                'last_completed_neuron': neuron_idx,
-                'num_neurons': num_neurons
-            }
-            with open(checkpoint_file, 'wb') as f:
-                pickle.dump(checkpoint, f)
-            print(f"\nCheckpoint saved at neuron {neuron_idx + 1}/{num_neurons}")
-    
-    # Collect valid metrics for averaging (check all results, not just new ones)
-    for neuron_idx in range(num_neurons):
-        if neuron_idx in per_neuron_results:
-            metrics = per_neuron_results[neuron_idx]
-            if metrics['valid'] and metrics['intra_cluster_dist'] is not None:
-                valid_intra_dists.append(metrics['intra_cluster_dist'])
-            if metrics['valid'] and metrics['inter_cluster_dist'] is not None:
-                valid_inter_dists.append(metrics['inter_cluster_dist'])
-    
-    # Clean up checkpoint file after completion
-    if checkpoint_file.exists():
-        checkpoint_file.unlink()
-        print("Checkpoint file removed after successful completion")
-    
-    # Step 5: Compute averages
-    avg_intra_cluster_dist = np.mean(valid_intra_dists) if valid_intra_dists else None
-    avg_inter_cluster_dist = np.mean(valid_inter_dists) if valid_inter_dists else None
-    
-    # Compute ratio (higher is better - more separation between clusters)
-    if avg_intra_cluster_dist is not None and avg_inter_cluster_dist is not None:
-        separation_ratio = avg_inter_cluster_dist / avg_intra_cluster_dist
-    else:
-        separation_ratio = None
-    
-    results = {
-        'avg_intra_cluster_dist': avg_intra_cluster_dist,
-        'avg_inter_cluster_dist': avg_inter_cluster_dist,
-        'separation_ratio': separation_ratio,
-        'num_valid_neurons': len(valid_intra_dists),
-        'total_neurons': num_neurons,
-        'per_neuron_results': per_neuron_results
-    }
-    
-    # Save results
-    results_file = save_dir / f"{experiment_name}_clustering_metrics_{target_layer.replace('.', '_')}.json"
-    with open(results_file, 'w') as f:
-        # Convert to JSON-serializable format
-        json_results = {
-            'avg_intra_cluster_dist': float(avg_intra_cluster_dist) if avg_intra_cluster_dist else None,
-            'avg_inter_cluster_dist': float(avg_inter_cluster_dist) if avg_inter_cluster_dist else None,
-            'separation_ratio': float(separation_ratio) if separation_ratio else None,
-            'num_valid_neurons': len(valid_intra_dists),
-            'total_neurons': num_neurons,
-        }
-        json.dump(json_results, f, indent=2)
-    
-    print(f"\nResults saved to {results_file}")
-    print(f"\nAverage Intra-cluster Distance: {avg_intra_cluster_dist:.4f}" if avg_intra_cluster_dist else "N/A")
-    print(f"Average Inter-cluster Distance: {avg_inter_cluster_dist:.4f}" if avg_inter_cluster_dist else "N/A")
-    print(f"Separation Ratio: {separation_ratio:.4f}" if separation_ratio else "N/A")
-    print(f"Valid Neurons: {len(valid_intra_dists)}/{num_neurons}")
-    
-    return avg_intra_cluster_dist, avg_inter_cluster_dist, separation_ratio
-
-
-def compute_neuron_clustering_metric_optimized(
-    model,
-    target_layer,
-    val_loader,
-    k=100,
-    patch_size=64,
-    experiment_name="default",
-    save_dir=None,
-    device='cuda',
-    sae=None,
-    min_cluster_size=5,
-    min_samples=3,
-    recompute_patches=False,
-    recompute_activations=False,
-    clip_batch_size=200,  # Increased from 100 for better throughput
-    neurons_per_batch=50   # Process multiple neurons together
-):
-    """
-    Optimized version that loads CLIP once, batches neurons, and uses mixed precision.
-    """
-    if save_dir is None:
-        save_dir = Path(f"/scratch/inf0/user/dbagci/pure/{experiment_name}")
-    else:
-        save_dir = Path(save_dir)
-    
-    save_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Step 1: Extract patches from ImageNet (model-independent)
+    # Step 1: Extract patches
     patch_cache_dir = Path("/scratch/inf0/user/dbagci/pure")
     if recompute_patches:
-        import shutil
-        if patch_cache_dir.exists():
-            shutil.rmtree(patch_cache_dir)
+        patch_file = patch_cache_dir / f"imagenet_patches_size{patch_size}.pkl"
+        if patch_file.exists():
+            patch_file.unlink()
     
     patches, patch_metadata = extract_patches_from_imagenet(
         val_loader, 
@@ -1341,8 +890,8 @@ def compute_neuron_clustering_metric_optimized(
         device=device
     )
     
-    # Step 2: Extract activations for all patches (model-dependent)
-    activation_file = save_dir / f"{experiment_name}_patch_activations_{target_layer.replace('.', '_')}.pt"
+    # Step 2: Extract activations
+    activation_file = save_dir / f"{experiment_name}_patch_activations.pt"
     
     if recompute_activations or not activation_file.exists():
         print("Computing patch activations...")
@@ -1355,126 +904,79 @@ def compute_neuron_clustering_metric_optimized(
         print(f"Loading cached activations from {activation_file}")
         activations = torch.load(activation_file)
     
-    # Step 3: Get top-k patches per neuron
+    # Step 3: Get top-k patches
     top_k_patches = get_top_k_patches_per_neuron(
         activations, patches, k=k, 
         save_dir=save_dir, 
         experiment_name=experiment_name
     )
     
-    # Step 4: OPTIMIZED - Load CLIP once and batch processing
-    print("Computing clustering metrics per neuron (optimized)...")
-    num_neurons = len(top_k_patches)
-    per_neuron_results = {}
+    # Cleanup memmap
+    if 'path' in activations and Path(activations['path']).exists():
+        Path(activations['path']).unlink()
+        print(f"Cleaned up memmap file")
     
+    # Step 4: Compute CLIP embeddings
+    if recompute_embeddings:
+        embeddings_file = save_dir / f"{experiment_name}_clip_embeddings.pkl"
+        if embeddings_file.exists():
+            embeddings_file.unlink()
+    
+    embeddings_per_neuron = compute_all_clip_embeddings_batched(
+        top_k_patches, 
+        device=device, 
+        batch_size=64,
+        save_dir=save_dir,
+        experiment_name=experiment_name
+    )
+    
+    # Step 5: Compute clustering metrics
+    print("Computing clustering metrics (sequential)...")
+    per_neuron_results = compute_metrics_sequential(
+        embeddings_per_neuron,
+        k=3,
+        min_cluster_size=min_cluster_size
+    )
+    
+    del embeddings_per_neuron
+    gc.collect()
+    
+    # Step 6: Aggregate results
     valid_intra_dists = []
     valid_inter_dists = []
     
-    # Load CLIP model once outside the loop
-    import clip
-    clip_model, clip_preprocess = clip.load("ViT-B/16", device=device)
-    clip_model.eval()
+    for neuron_idx, metrics in per_neuron_results.items():
+        if metrics['valid'] and metrics['intra_cluster_dist'] is not None:
+            valid_intra_dists.append(metrics['intra_cluster_dist'])
+        if metrics['valid'] and metrics['inter_cluster_dist'] is not None:
+            valid_inter_dists.append(metrics['inter_cluster_dist'])
     
-    # Enable mixed precision for CLIP inference
-    from torch.cuda.amp import autocast
+    avg_intra = np.mean(valid_intra_dists) if valid_intra_dists else None
+    avg_inter = np.mean(valid_inter_dists) if valid_inter_dists else None
     
-    # Process neurons in batches
-    neuron_indices = list(range(num_neurons))
-    
-    for batch_start in tqdm(range(0, num_neurons, neurons_per_batch), desc="Analyzing neuron batches"):
-        batch_end = min(batch_start + neurons_per_batch, num_neurons)
-        neuron_batch = neuron_indices[batch_start:batch_end]
-        
-        # Collect all patches for this batch of neurons
-        all_batch_patches = []
-        neuron_patch_ranges = []  # Track which patches belong to which neuron
-        
-        for neuron_idx in neuron_batch:
-            neuron_patches = top_k_patches[neuron_idx]
-            start_idx = len(all_batch_patches)
-            all_batch_patches.extend(neuron_patches)
-            end_idx = len(all_batch_patches)
-            neuron_patch_ranges.append((neuron_idx, start_idx, end_idx))
-        
-        if not all_batch_patches:
-            continue
-            
-        # Compute CLIP embeddings for all patches in this batch
-        all_embeddings = []
-        with torch.no_grad(), autocast():
-            for i in range(0, len(all_batch_patches), clip_batch_size):
-                batch_patches = all_batch_patches[i:i+clip_batch_size]
-                
-                # Preprocess patches
-                batch_tensors = torch.stack([clip_preprocess(patch) for patch in batch_patches])
-                batch_tensors = batch_tensors.to(device)
-                
-                # Encode with CLIP using mixed precision
-                embeddings = clip_model.encode_image(batch_tensors)
-                embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)  # Normalize
-                
-                all_embeddings.append(embeddings.cpu())
-        
-        # Concatenate all embeddings for this neuron batch
-        if all_embeddings:
-            combined_embeddings = torch.cat(all_embeddings, dim=0)
-            
-            # Process each neuron's embeddings individually for clustering
-            for neuron_idx, start_idx, end_idx in neuron_patch_ranges:
-                neuron_embeddings = combined_embeddings[start_idx:end_idx]
-                
-                # Compute clustering metrics
-                metrics = compute_clustering_metrics(
-                    neuron_embeddings, 
-                    min_cluster_size=min_cluster_size,
-                    min_samples=min_samples
-                )
-                
-                per_neuron_results[neuron_idx] = metrics
-                
-                # Collect valid metrics for averaging
-                if metrics['valid'] and metrics['intra_cluster_dist'] is not None:
-                    valid_intra_dists.append(metrics['intra_cluster_dist'])
-                if metrics['valid'] and metrics['inter_cluster_dist'] is not None:
-                    valid_inter_dists.append(metrics['inter_cluster_dist'])
-    
-    # Step 5: Compute averages
-    avg_intra_cluster_dist = np.mean(valid_intra_dists) if valid_intra_dists else None
-    avg_inter_cluster_dist = np.mean(valid_inter_dists) if valid_inter_dists else None
-    
-    # Compute ratio (higher is better - more separation between clusters)
-    if avg_intra_cluster_dist is not None and avg_inter_cluster_dist is not None:
-        separation_ratio = avg_inter_cluster_dist / avg_intra_cluster_dist
+    if avg_intra is not None and avg_inter is not None:
+        sep_ratio = avg_inter / avg_intra
     else:
-        separation_ratio = None
-    
-    results = {
-        'avg_intra_cluster_dist': avg_intra_cluster_dist,
-        'avg_inter_cluster_dist': avg_inter_cluster_dist,
-        'separation_ratio': separation_ratio,
-        'num_valid_neurons': len(valid_intra_dists),
-        'total_neurons': num_neurons,
-        'per_neuron_results': per_neuron_results
-    }
+        sep_ratio = None
     
     # Save results
-    results_file = save_dir / f"{experiment_name}_clustering_metrics_{target_layer.replace('.', '_')}_optimized.json"
+    results_file = save_dir / f"{experiment_name}_clustering_metrics.json"
     with open(results_file, 'w') as f:
         json_results = {
-            'avg_intra_cluster_dist': float(avg_intra_cluster_dist) if avg_intra_cluster_dist else None,
-            'avg_inter_cluster_dist': float(avg_inter_cluster_dist) if avg_inter_cluster_dist else None,
-            'separation_ratio': float(separation_ratio) if separation_ratio else None,
+            'avg_intra_cluster_dist': float(avg_intra) if avg_intra else None,
+            'avg_inter_cluster_dist': float(avg_inter) if avg_inter else None,
+            'separation_ratio': float(sep_ratio) if sep_ratio else None,
             'num_valid_neurons': len(valid_intra_dists),
-            'total_neurons': num_neurons,
+            'total_neurons': len(per_neuron_results),
         }
         json.dump(json_results, f, indent=2)
     
     print(f"\nResults saved to {results_file}")
-    print(f"\nAverage Intra-cluster Distance: {avg_intra_cluster_dist:.4f}" if avg_intra_cluster_dist else "N/A")
-    print(f"Average Inter-cluster Distance: {avg_inter_cluster_dist:.4f}" if avg_inter_cluster_dist else "N/A")
-    print(f"Separation Ratio: {separation_ratio:.4f}" if separation_ratio else "N/A")
-    print(f"Valid Neurons: {len(valid_intra_dists)}/{num_neurons}")
+    print(f"Average Intra-cluster Distance: {avg_intra:.6f}" if avg_intra else "N/A")
+    print(f"Average Inter-cluster Distance: {avg_inter:.6f}" if avg_inter else "N/A")
+    print(f"Separation Ratio: {sep_ratio:.6f}" if sep_ratio else "N/A")
     
-    return avg_intra_cluster_dist, avg_inter_cluster_dist, separation_ratio
-
-
+    if return_top_patches:
+        return avg_intra, avg_inter, sep_ratio, top_k_patches
+    else:
+        return avg_intra, avg_inter, sep_ratio

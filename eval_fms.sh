@@ -2,14 +2,23 @@
 #SBATCH -p gpu24
 #SBATCH --job-name=fms_sae
 #SBATCH -o /BS/disentanglement/work/Disentanglement/jobs/sae_training/fms-%j.out
-#SBATCH --time=2:59:00
+#SBATCH --time=10:00:00
 #SBATCH --gres gpu:1
 
 STORE_DIR="/BS/disentanglement/work/msae/extract_embeddings"
 
 ##ViTB16
-# MODEL="vit_b_16"
-# #ReLU
+MODEL="vit_b_16"
+#ReLU
+SAE="/BS/disentanglement/work/msae/768_768_ReLU_003_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE 
+
+SAE="/BS/disentanglement/work/msae/1536_768_ReLU_003_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE 
+
+SAE="/BS/disentanglement/work/msae/3072_768_ReLU_003_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE 
+
 # SAE="/BS/disentanglement/work/msae/6144_768_ReLU_003_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
@@ -20,6 +29,15 @@ STORE_DIR="/BS/disentanglement/work/msae/extract_embeddings"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
 # #Top256
+SAE="/BS/disentanglement/work/msae/768_768_TopKReLU_256_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/1536_768_TopKReLU_256_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/3072_768_TopKReLU_256_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
 # SAE="/BS/disentanglement/work/msae/6144_768_TopKReLU_256_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
@@ -30,6 +48,15 @@ STORE_DIR="/BS/disentanglement/work/msae/extract_embeddings"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
 # #Top64
+SAE="/BS/disentanglement/work/msae/768_768_TopKReLU_64_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/1536_768_TopKReLU_64_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/3072_768_TopKReLU_64_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
 # SAE="/BS/disentanglement/work/msae/6144_768_TopKReLU_64_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
@@ -40,6 +67,15 @@ STORE_DIR="/BS/disentanglement/work/msae/extract_embeddings"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
 # #BatchTop256
+SAE="/BS/disentanglement/work/msae/batchtopk/768_768_TopKReLU_256_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/batchtopk/1536_768_TopKReLU_256_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/batchtopk/3072_768_TopKReLU_256_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
 # SAE="/BS/disentanglement/work/msae/batchtopk/6144_768_TopKReLU_256_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
@@ -50,6 +86,15 @@ STORE_DIR="/BS/disentanglement/work/msae/extract_embeddings"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
 # #BatchTop64
+SAE="/BS/disentanglement/work/msae/batchtopk/768_768_TopKReLU_64_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/batchtopk/1536_768_TopKReLU_64_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/batchtopk/3072_768_TopKReLU_64_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
 # SAE="/BS/disentanglement/work/msae/batchtopk/6144_768_TopKReLU_64_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
@@ -60,6 +105,15 @@ STORE_DIR="/BS/disentanglement/work/msae/extract_embeddings"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
 # #MSAE RW
+SAE="/BS/disentanglement/work/msae/768_768_TopKReLU_64_RW_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/1536_768_TopKReLU_64_RW_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/3072_768_TopKReLU_64_RW_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
 # SAE="/BS/disentanglement/work/msae/6144_768_TopKReLU_64_RW_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
@@ -70,6 +124,15 @@ STORE_DIR="/BS/disentanglement/work/msae/extract_embeddings"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
 # #MSAE UW
+SAE="/BS/disentanglement/work/msae/768_768_TopKReLU_64_UW_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/1536_768_TopKReLU_64_UW_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/3072_768_TopKReLU_64_UW_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE 
+
 # SAE="/BS/disentanglement/work/msae/6144_768_TopKReLU_64_UW_False_False_0.0_imagenet_vit_b_16_embeddings_train.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
@@ -157,19 +220,36 @@ STORE_DIR="/BS/disentanglement/work/msae/extract_embeddings"
 # echo "ResNet50 SAE evaluated"
 
 # ## DINOv2
-# MODEL="dinov2_vitl14"
+MODEL="dinov2_vitl14"
 # # #ReLU
+SAE="/BS/disentanglement/work/msae/1024_1024_ReLU_003_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/2048_1024_ReLU_003_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"                      
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/4096_1024_ReLU_003_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
 # SAE="/BS/disentanglement/work/msae/8192_1024_ReLU_003_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
-# SAE="/BS/disentanglement/work/msae/16384_1024_ReLU_003_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
-                                   
+# SAE="/BS/disentanglement/work/msae/16384_1024_ReLU_003_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"                      
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
 # SAE="/BS/disentanglement/work/msae/32768_1024_ReLU_003_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
 # #Top256
+SAE="/BS/disentanglement/work/msae/1024_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/2048_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/4096_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
 # SAE="/BS/disentanglement/work/msae/8192_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
@@ -180,6 +260,15 @@ STORE_DIR="/BS/disentanglement/work/msae/extract_embeddings"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
 # #Top64
+SAE="/BS/disentanglement/work/msae/1024_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/2048_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/4096_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE 
+
 # SAE="/BS/disentanglement/work/msae/8192_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
@@ -190,6 +279,15 @@ STORE_DIR="/BS/disentanglement/work/msae/extract_embeddings"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
 # #BatchTop256
+SAE="/BS/disentanglement/work/msae/batchtopk/1024_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/batchtopk/2048_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/batchtopk/4096_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
 # SAE="/BS/disentanglement/work/msae/batchtopk/8192_1024_TopKReLU_256_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
@@ -200,6 +298,15 @@ STORE_DIR="/BS/disentanglement/work/msae/extract_embeddings"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
 # #BatchTop64
+SAE="/BS/disentanglement/work/msae/batchtopk/1024_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/batchtopk/2048_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/batchtopk/4096_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
 # SAE="/BS/disentanglement/work/msae/batchtopk/8192_1024_TopKReLU_64_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
@@ -210,6 +317,15 @@ STORE_DIR="/BS/disentanglement/work/msae/extract_embeddings"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
 # #MSAE RW
+SAE="/BS/disentanglement/work/msae/1024_1024_TopKReLU_64_RW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/2048_1024_TopKReLU_64_RW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/4096_1024_TopKReLU_64_RW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
 # SAE="/BS/disentanglement/work/msae/8192_1024_TopKReLU_64_RW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
@@ -220,6 +336,15 @@ STORE_DIR="/BS/disentanglement/work/msae/extract_embeddings"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
 # #MSAE UW
+SAE="/BS/disentanglement/work/msae/1024_1024_TopKReLU_64_UW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/2048_1024_TopKReLU_64_UW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
+
+SAE="/BS/disentanglement/work/msae/4096_1024_TopKReLU_64_UW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
+uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE 
+
 # SAE="/BS/disentanglement/work/msae/8192_1024_TopKReLU_64_UW_False_False_0.0_imagenet_dinov2_vitl14_embeddings_train.pth"
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --sae $SAE  
 
@@ -276,6 +401,6 @@ STORE_DIR="/BS/disentanglement/work/msae/extract_embeddings"
 # TAU=0.03
 # uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --eval-hc True --tau $TAU
 
-MODEL="dinov2_vitl14"
-TAU=0.001
-uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --eval-hc True --tau $TAU
+# MODEL="dinov2_vitl14"
+# TAU=0.001
+# uv run /BS/disentanglement/work/Disentanglement/MSAE/fms.py -m $MODEL --eval-hc True --tau $TAU
