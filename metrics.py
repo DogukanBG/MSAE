@@ -416,6 +416,20 @@ from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_distances
 import torchvision.transforms as transforms
 import clip
+import torch
+import numpy as np
+from torch.utils.data import Dataset, DataLoader
+from pathlib import Path
+import pickle
+import json
+import gc
+from tqdm import tqdm
+from sklearn.cluster import KMeans
+from sklearn.metrics.pairwise import cosine_distances
+from sklearn.metrics import silhouette_score
+import torchvision.transforms as transforms
+import clip
+from transformers import AutoImageProcessor, AutoModel
 
 
 class PatchDataset(Dataset):
@@ -667,11 +681,14 @@ def get_top_k_patches_per_neuron(mmap_info, patches, k=100,
     return top_k_patches_per_neuron
 
 
-def compute_all_clip_embeddings_batched(top_k_patches_dict, device='cuda', batch_size=64, 
-                                        save_dir=None, experiment_name="default"):
+def compute_all_embeddings_batched(top_k_patches_dict, device='cuda', batch_size=64, 
+                                   save_dir=None, experiment_name="default",
+                                   embedding_type='clip'):
     """
-    Compute CLIP embeddings for all neurons' patches in batched fashion.
-    Saves embeddings per neuron immediately to avoid memory issues.
+    Compute embeddings (CLIP and/or DINOv2) for all neurons' patches in batched fashion.
+    
+    Args:
+        embedding_type: 'clip', 'dinov2', or 'both'
     """
     if save_dir is None:
         save_dir = Path(f"/scratch/inf0/user/dbagci/pure/{experiment_name}")
@@ -679,19 +696,29 @@ def compute_all_clip_embeddings_batched(top_k_patches_dict, device='cuda', batch
         save_dir = Path(save_dir)
     
     save_dir.mkdir(parents=True, exist_ok=True)
-    embeddings_file = save_dir / f"{experiment_name}_clip_embeddings.pkl"
+    embeddings_file = save_dir / f"{experiment_name}_{embedding_type}_embeddings.pkl"
     
     # Load if exists
     if embeddings_file.exists():
-        print(f"Loading cached CLIP embeddings from {embeddings_file}")
+        print(f"Loading cached embeddings from {embeddings_file}")
         with open(embeddings_file, 'rb') as f:
             return pickle.load(f)
     
-    print("Computing CLIP embeddings (batched)...")
+    print(f"Computing {embedding_type} embeddings (batched)...")
     
-    # Load CLIP model
-    clip_model, preprocess = clip.load("ViT-B/16", device=device)
-    clip_model.eval()
+    # Load models
+    models_dict = {}
+    
+    if embedding_type in ['clip', 'both']:
+        clip_model, clip_preprocess = clip.load("ViT-B/16", device=device)
+        clip_model.eval()
+        models_dict['clip'] = (clip_model, clip_preprocess)
+    
+    if embedding_type in ['dinov2', 'both']:
+        dino_processor = AutoImageProcessor.from_pretrained('facebook/dinov2-base')
+        dino_model = AutoModel.from_pretrained('facebook/dinov2-base').to(device)
+        dino_model.eval()
+        models_dict['dinov2'] = (dino_model, dino_processor)
     
     embeddings_per_neuron = {}
     
@@ -703,12 +730,37 @@ def compute_all_clip_embeddings_batched(top_k_patches_dict, device='cuda', batch
         with torch.no_grad():
             for i in range(0, len(patches), batch_size):
                 batch = patches[i:i+batch_size]
-                batch_tensors = torch.stack([preprocess(p) for p in batch]).to(device)
-                embeddings = clip_model.encode_image(batch_tensors)
-                embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
-                neuron_embeddings.append(embeddings.cpu())
+                batch_embeddings = []
                 
-                del batch_tensors, embeddings
+                # CLIP embeddings
+                if 'clip' in models_dict:
+                    clip_model, clip_preprocess = models_dict['clip']
+                    batch_tensors = torch.stack([clip_preprocess(p) for p in batch]).to(device)
+                    clip_emb = clip_model.encode_image(batch_tensors)
+                    clip_emb = clip_emb / clip_emb.norm(dim=-1, keepdim=True)
+                    batch_embeddings.append(clip_emb)
+                    del batch_tensors
+                
+                # DINOv2 embeddings
+                if 'dinov2' in models_dict:
+                    dino_model, dino_processor = models_dict['dinov2']
+                    inputs = dino_processor(images=batch, return_tensors="pt")
+                    inputs = {k: v.to(device) for k, v in inputs.items()}
+                    dino_outputs = dino_model(**inputs)
+                    dino_emb = dino_outputs.last_hidden_state[:, 0]  # CLS token
+                    dino_emb = dino_emb / dino_emb.norm(dim=-1, keepdim=True)
+                    batch_embeddings.append(dino_emb)
+                    del inputs, dino_outputs
+                
+                # Concatenate embeddings if using both
+                if len(batch_embeddings) > 1:
+                    combined = torch.cat(batch_embeddings, dim=-1)
+                else:
+                    combined = batch_embeddings[0]
+                
+                neuron_embeddings.append(combined.cpu())
+                
+                del batch_embeddings, combined
                 if device == 'cuda':
                     torch.cuda.empty_cache()
         
@@ -717,266 +769,547 @@ def compute_all_clip_embeddings_batched(top_k_patches_dict, device='cuda', batch
         gc.collect()
     
     # Save embeddings
-    print(f"Saving CLIP embeddings to {embeddings_file}")
+    print(f"Saving embeddings to {embeddings_file}")
     with open(embeddings_file, 'wb') as f:
         pickle.dump(embeddings_per_neuron, f)
     
     # Cleanup
-    del clip_model
+    # if 'clip' in models_dict:
+    #     del models_dict['clip'][0]
+    # if 'dinov2' in models_dict:
+    #     del models_dict['dinov2'][0]
     if device == 'cuda':
         torch.cuda.empty_cache()
     gc.collect()
     
     return embeddings_per_neuron
 
-from hdbscan import HDBSCAN
+import torch
+import numpy as np
+import json
+import pickle
+import gc
+from pathlib import Path
+from tqdm import tqdm
+from sklearn.cluster import KMeans, HDBSCAN
+from sklearn.metrics import silhouette_score
+from sklearn.metrics.pairwise import cosine_distances
 
-def compute_clustering_metrics_cosine(embeddings, k=3):
+def compute_semantic_diversity(embeddings):
     """
-    Cluster embeddings using HDBSCAN with cosine similarity.
+    Computes mean cosine similarity. 
     """
-    # Normalize embeddings
+    embeddings_np = embeddings.numpy()
+    num_samples = embeddings_np.shape[0]
+    
+    if num_samples < 2:
+        return {'mean_similarity': None}
+    
+    # Compute pairwise cosine similarity (1 - cosine_distance)
+    # We only need mean similarity for the final log
+    distances = cosine_distances(embeddings_np)
+    similarities = 1 - distances
+    
+    # Remove diagonal (self-similarity)
+    mask = ~np.eye(similarities.shape[0], dtype=bool)
+    pairwise_sims = similarities[mask]
+    
+    return {
+        'mean_similarity': float(np.mean(pairwise_sims))
+    }
+
+def compute_hdbscan_clustering(embeddings):
+    """
+    HDBSCAN with min_cluster_size=1. Computes Intra, Inter, Silhouette, Coverage.
+    """
+    # Normalize for cosine similarity usage in clustering
     embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
     embeddings_np = embeddings.numpy()
     num_samples = embeddings_np.shape[0]
     
-    # if num_samples < min_cluster_size:
-    #     return {
-    #         'intra_cluster_dist': None,
-    #         'inter_cluster_dist': None,
-    #         'num_clusters': 0,
-    #         'cluster_sizes': [],
-    #         'valid': False
-    #     }
+    default_result = {
+        'intra_cluster_dist': None,
+        'inter_cluster_dist': None,
+        'num_clusters': 0,
+        'coverage': 0.0,
+        'silhouette': None,
+        'valid': False
+    }
     
-    clusterer = HDBSCAN()
-    cluster_labels = clusterer.fit_predict(embeddings_np)
+    if num_samples < 2:
+        return default_result
     
-    # Filter out noise points (label -1)
+    distance_matrix = cosine_distances(embeddings_np)
+    
+    clusterer = HDBSCAN(
+        metric='precomputed',
+        min_samples=1,
+        cluster_selection_epsilon=0.0,
+        cluster_selection_method='eom',
+        allow_single_cluster=True
+    )
+    cluster_labels = clusterer.fit_predict(distance_matrix)
+    
+    # Coverage (points not labeled as noise -1)
     valid_mask = cluster_labels != -1
+    coverage = valid_mask.sum() / len(cluster_labels)
+    
     valid_labels = cluster_labels[valid_mask]
     valid_embeddings = embeddings_np[valid_mask]
     
     if len(valid_labels) == 0:
-        return {
-            'intra_cluster_dist': None,
-            'inter_cluster_dist': None,
-            'num_clusters': 0,
-            'cluster_sizes': [],
-            'valid': False
-        }
+        return default_result
     
-    unique_clusters, cluster_counts = np.unique(valid_labels, return_counts=True)
+    unique_clusters = np.unique(valid_labels)
     num_clusters = len(unique_clusters)
     
-    if num_clusters < 2:
-        return {
-            'intra_cluster_dist': None,
-            'inter_cluster_dist': None,
-            'num_clusters': num_clusters,
-            'cluster_sizes': cluster_counts.tolist(),
-            'valid': False
-        }
-    
-    # Compute cluster centers (mean of normalized vectors)
-    cluster_centers = []
-    for cluster_id in unique_clusters:
-        cluster_mask = valid_labels == cluster_id
-        cluster_points = valid_embeddings[cluster_mask]
-        center = np.mean(cluster_points, axis=0)
-        # Normalize center
-        center = center / np.linalg.norm(center)
-        cluster_centers.append(center)
-    cluster_centers = np.array(cluster_centers)
-    
-    # Compute cosine distances
+    # --- Intra-cluster distance ---
     distances = cosine_distances(valid_embeddings)
-    
-    # Intra-cluster distances
     intra_cluster_dists = []
+    
     for cluster_id in unique_clusters:
         cluster_mask = valid_labels == cluster_id
         cluster_indices = np.where(cluster_mask)[0]
         if len(cluster_indices) > 1:
+            # Extract distances between points in this cluster
             cluster_dists = distances[np.ix_(cluster_indices, cluster_indices)]
+            # Upper triangle only
             triu_indices = np.triu_indices_from(cluster_dists, k=1)
-            intra_dists = cluster_dists[triu_indices]
-            intra_cluster_dists.extend(intra_dists)
+            intra_cluster_dists.extend(cluster_dists[triu_indices])
+            
+    avg_intra = np.mean(intra_cluster_dists) if intra_cluster_dists else None
     
-    avg_intra_cluster_dist = np.mean(intra_cluster_dists) if intra_cluster_dists else None
+    # --- Inter-cluster & Silhouette (only if >= 2 valid clusters) ---
+    avg_inter = None
+    silhouette = None
     
-    # Inter-cluster distances
-    if len(cluster_centers) > 1:
-        centroid_distances = cosine_distances(cluster_centers)
-        triu_indices = np.triu_indices_from(centroid_distances, k=1)
-        inter_cluster_dists = centroid_distances[triu_indices]
-        avg_inter_cluster_dist = np.mean(inter_cluster_dists)
-    else:
-        avg_inter_cluster_dist = None
-    
+    if num_clusters >= 2:
+        # Inter-cluster (centroid distances)
+        cluster_centers = []
+        for cluster_id in unique_clusters:
+            cluster_points = valid_embeddings[valid_labels == cluster_id]
+            center = np.mean(cluster_points, axis=0)
+            center = center / np.linalg.norm(center)
+            cluster_centers.append(center)
+            
+        centroid_dists = cosine_distances(np.array(cluster_centers))
+        triu_indices = np.triu_indices_from(centroid_dists, k=1)
+        avg_inter = np.mean(centroid_dists[triu_indices])
+        
+        # Silhouette Score (ignoring noise)
+        try:
+            silhouette = silhouette_score(valid_embeddings, valid_labels, metric='cosine')
+        except ValueError:
+            silhouette = None
+
     return {
-        'intra_cluster_dist': avg_intra_cluster_dist,
-        'inter_cluster_dist': avg_inter_cluster_dist,
+        'intra_cluster_dist': avg_intra,
+        'inter_cluster_dist': avg_inter,
         'num_clusters': num_clusters,
-        'cluster_sizes': cluster_counts.tolist(),
+        'coverage': float(coverage),
+        'silhouette': float(silhouette) if silhouette is not None else None,
         'valid': True
     }
 
-
-def compute_metrics_sequential(embeddings_per_neuron, k=3, min_cluster_size=5):
+def compute_kmeans_clustering(embeddings, k):
     """
-    Sequential processing of clustering metrics to avoid memory issues.
+    KMeans for k=1, 2, 3. Computes Intra, Inter, Silhouette.
     """
-    per_neuron_results = {}
+    embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
+    embeddings_np = embeddings.numpy()
+    num_samples = embeddings_np.shape[0]
     
-    for neuron_idx, embeddings in tqdm(embeddings_per_neuron.items(), desc="Clustering neurons"):
-        metrics = compute_clustering_metrics_cosine(
-            embeddings, 
-            k=k
-        )
-        per_neuron_results[neuron_idx] = metrics
+    if num_samples < k:
+        return {'valid': False}
         
-        del embeddings
-        gc.collect()
+    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+    cluster_labels = kmeans.fit_predict(embeddings_np)
     
-    return per_neuron_results
+    # Intra-cluster
+    distances = cosine_distances(embeddings_np)
+    intra_cluster_dists = []
+    
+    for cluster_id in range(k):
+        cluster_indices = np.where(cluster_labels == cluster_id)[0]
+        if len(cluster_indices) > 1:
+            cluster_dists = distances[np.ix_(cluster_indices, cluster_indices)]
+            triu_indices = np.triu_indices_from(cluster_dists, k=1)
+            intra_cluster_dists.extend(cluster_dists[triu_indices])
+            
+    avg_intra = np.mean(intra_cluster_dists) if intra_cluster_dists else None
+    
+    # Inter-cluster & Silhouette (only for k > 1)
+    avg_inter = None
+    silhouette = None
+    
+    if k > 1:
+        centers = kmeans.cluster_centers_
+        centers = centers / np.linalg.norm(centers, axis=1, keepdims=True)
+        centroid_dists = cosine_distances(centers)
+        triu_indices = np.triu_indices_from(centroid_dists, k=1)
+        avg_inter = np.mean(centroid_dists[triu_indices])
+        
+        try:
+            silhouette = silhouette_score(embeddings_np, cluster_labels, metric='cosine')
+        except ValueError:
+            silhouette = None
+            
+    return {
+        'intra_cluster_dist': avg_intra,
+        'inter_cluster_dist': avg_inter,
+        'num_clusters': k,
+        'silhouette': float(silhouette) if silhouette is not None else None,
+        'valid': True
+    }
 
+def compute_all_clustering_metrics(embeddings):
+    return {
+        'diversity': compute_semantic_diversity(embeddings),
+        'hdbscan': compute_hdbscan_clustering(embeddings),
+        'kmeans_k1': compute_kmeans_clustering(embeddings, k=1),
+        'kmeans_k2': compute_kmeans_clustering(embeddings, k=2),
+        'kmeans_k3': compute_kmeans_clustering(embeddings, k=3),
+    }
+
+def aggregate_results(per_neuron_results):
+    """
+    Aggregates all neuron results into the 'avg_' format required.
+    Calculates Separation Ratio (avg_inter / avg_intra).
+    """
+    aggregated = {
+        'diversity': {},
+        'hdbscan': {},
+        'kmeans_k1': {},
+        'kmeans_k2': {},
+        'kmeans_k3': {}
+    }
+    
+    # Map the raw keys returned by functions to the list of values we want to average
+    # Schema: { MethodName: [Keys to Aggregate] }
+    keys_map = {
+        'diversity': ['mean_similarity'],
+        'hdbscan': ['intra_cluster_dist', 'inter_cluster_dist', 'num_clusters', 'coverage', 'silhouette'],
+        'kmeans_k1': ['intra_cluster_dist'],
+        'kmeans_k2': ['intra_cluster_dist', 'inter_cluster_dist', 'silhouette'],
+        'kmeans_k3': ['intra_cluster_dist', 'inter_cluster_dist', 'num_clusters', 'silhouette']
+    }
+
+    for method, metric_keys in keys_map.items():
+        # Initialize containers
+        data_lists = {k: [] for k in metric_keys}
+        
+        for neuron_res in per_neuron_results.values():
+            res = neuron_res.get(method, {})
+            
+            # Skip invalid results (e.g. not enough samples)
+            if method != 'diversity' and not res.get('valid', True):
+                continue
+                
+            for k in metric_keys:
+                val = res.get(k)
+                if val is not None:
+                    data_lists[k].append(val)
+        
+        # Compute Averages and Counts
+        for k, values in data_lists.items():
+            if values:
+                aggregated[method][f'avg_{k}'] = float(np.mean(values))
+                aggregated[method][f'num_valid_neurons_{k}'] = len(values)
+            else:
+                aggregated[method][f'avg_{k}'] = None
+        
+        # Compute Separation Ratio (Inter / Intra)
+        avg_intra = aggregated[method].get('avg_intra_cluster_dist')
+        avg_inter = aggregated[method].get('avg_inter_cluster_dist')
+        
+        if avg_intra is not None and avg_inter is not None and avg_intra > 0:
+            aggregated[method]['separation_ratio'] = avg_inter / avg_intra
+        else:
+            aggregated[method]['separation_ratio'] = None
+            
+    return aggregated
 
 def compute_neuron_clustering_metric(
     model,
     target_layer,
     val_loader,
     k=100,
-    patch_size=64,
+    patch_size=56,
     experiment_name="default",
     save_dir=None,
     device='cuda',
     sae=None,
-    min_cluster_size=5,
-    min_samples=3,
     recompute_patches=False,
     recompute_activations=False,
     recompute_embeddings=False,
-    return_top_patches=False,
     n_workers=4
 ):
     """
-    Main function to compute the clustering metric for all neurons.
-    
-    Returns:
-        avg_intra: Average intra-cluster distance
-        avg_inter: Average inter-cluster distance
-        sep_ratio: Separation ratio (inter/intra)
-        top_k_patches: (Optional) Dictionary of top patches per neuron
+    Main pipeline: Patches -> Activations -> Top-K -> CLIP Embeddings -> Metrics.
     """
     if save_dir is None:
         save_dir = Path(f"/scratch/inf0/user/dbagci/pure/{experiment_name}")
     else:
         save_dir = Path(save_dir)
-    
     save_dir.mkdir(parents=True, exist_ok=True)
     
-    # Step 1: Extract patches
+    # 1. Patches
     patch_cache_dir = Path("/scratch/inf0/user/dbagci/pure")
     if recompute_patches:
-        patch_file = patch_cache_dir / f"imagenet_patches_size{patch_size}.pkl"
-        if patch_file.exists():
-            patch_file.unlink()
-    
+        p_file = patch_cache_dir / f"imagenet_patches_size{patch_size}.pkl"
+        if p_file.exists(): p_file.unlink()
+            
     patches, patch_metadata = extract_patches_from_imagenet(
-        val_loader, 
-        patch_size=patch_size, 
-        save_dir=patch_cache_dir,
-        device=device
+        val_loader, patch_size=patch_size, save_dir=patch_cache_dir, device=device
     )
     
-    # Step 2: Extract activations
-    activation_file = save_dir / f"{experiment_name}_patch_activations.pt"
-    
-    if recompute_activations or not activation_file.exists():
+    # 2. Activations
+    act_file = save_dir / f"{experiment_name}_patch_activations.pt"
+    if recompute_activations or not act_file.exists():
         print("Computing patch activations...")
         activations = extract_patch_activations(
             model, patches, patch_metadata, target_layer,
             device=device, sae=sae, experiment_name=experiment_name
         )
-        torch.save(activations, activation_file)
+        torch.save(activations, act_file)
     else:
-        print(f"Loading cached activations from {activation_file}")
-        activations = torch.load(activation_file)
-    
-    # Step 3: Get top-k patches
+        print(f"Loading cached activations: {act_file}")
+        activations = torch.load(act_file)
+        
+    # 3. Top K
     top_k_patches = get_top_k_patches_per_neuron(
-        activations, patches, k=k, 
-        save_dir=save_dir, 
-        experiment_name=experiment_name
+        activations, patches, k=k, save_dir=save_dir, experiment_name=experiment_name
     )
     
-    # Cleanup memmap
+    # Clean up activations
     if 'path' in activations and Path(activations['path']).exists():
         Path(activations['path']).unlink()
-        print(f"Cleaned up memmap file")
+    del activations
+    gc.collect()
     
-    # Step 4: Compute CLIP embeddings
+    # 4. Embeddings (Strictly CLIP)
     if recompute_embeddings:
-        embeddings_file = save_dir / f"{experiment_name}_clip_embeddings.pkl"
-        if embeddings_file.exists():
-            embeddings_file.unlink()
-    
-    embeddings_per_neuron = compute_all_clip_embeddings_batched(
+        emb_file = save_dir / f"{experiment_name}_clip_embeddings.pkl"
+        if emb_file.exists(): emb_file.unlink()
+            
+    print("Computing CLIP embeddings...")
+    # NOTE: Hardcoded 'clip' here as requested
+    embeddings_per_neuron = compute_all_embeddings_batched(
         top_k_patches, 
         device=device, 
         batch_size=64,
         save_dir=save_dir,
-        experiment_name=experiment_name
+        experiment_name=experiment_name,
+        embedding_type='clip' 
     )
     
-    # Step 5: Compute clustering metrics
-    print("Computing clustering metrics (sequential)...")
-    per_neuron_results = compute_metrics_sequential(
-        embeddings_per_neuron,
-        k=3,
-        min_cluster_size=min_cluster_size
-    )
+    # 5. Compute Metrics
+    print("Computing clustering metrics (HDBSCAN, KMeans, Diversity)...")
+    per_neuron_results = {}
+    for neuron_idx, embeddings in tqdm(embeddings_per_neuron.items()):
+        per_neuron_results[neuron_idx] = compute_all_clustering_metrics(embeddings)
     
     del embeddings_per_neuron
     gc.collect()
     
-    # Step 6: Aggregate results
-    valid_intra_dists = []
-    valid_inter_dists = []
+    # 6. Aggregate
+    print("Aggregating results...")
+    aggregated_results = aggregate_results(per_neuron_results)
     
-    for neuron_idx, metrics in per_neuron_results.items():
-        if metrics['valid'] and metrics['intra_cluster_dist'] is not None:
-            valid_intra_dists.append(metrics['intra_cluster_dist'])
-        if metrics['valid'] and metrics['inter_cluster_dist'] is not None:
-            valid_inter_dists.append(metrics['inter_cluster_dist'])
-    
-    avg_intra = np.mean(valid_intra_dists) if valid_intra_dists else None
-    avg_inter = np.mean(valid_inter_dists) if valid_inter_dists else None
-    
-    if avg_intra is not None and avg_inter is not None:
-        sep_ratio = avg_inter / avg_intra
-    else:
-        sep_ratio = None
-    
-    # Save results
-    results_file = save_dir / f"{experiment_name}_clustering_metrics.json"
+    # 7. Save
+    results_file = save_dir / f"{experiment_name}_metrics_clip.json"
     with open(results_file, 'w') as f:
-        json_results = {
-            'avg_intra_cluster_dist': float(avg_intra) if avg_intra else None,
-            'avg_inter_cluster_dist': float(avg_inter) if avg_inter else None,
-            'separation_ratio': float(sep_ratio) if sep_ratio else None,
-            'num_valid_neurons': len(valid_intra_dists),
-            'total_neurons': len(per_neuron_results),
-        }
-        json.dump(json_results, f, indent=2)
+        json.dump(aggregated_results, f, indent=2)
+        
+    print(f"Done. Saved to {results_file}")
+    return aggregated_results
+
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+import numpy as np
+from pathlib import Path
+
+
+def create_top_patches_pdf(
+    top_k_patches_dict,
+    save_path,
+    top_x=10,
+    neurons_to_visualize=None,
+    patches_per_row=5,
+    figsize_per_patch=2.0,
+    title_prefix="Neuron"
+):
+    """
+    Create a PDF visualizing the top X most activating patches for each neuron.
     
-    print(f"\nResults saved to {results_file}")
-    print(f"Average Intra-cluster Distance: {avg_intra:.6f}" if avg_intra else "N/A")
-    print(f"Average Inter-cluster Distance: {avg_inter:.6f}" if avg_inter else "N/A")
-    print(f"Separation Ratio: {sep_ratio:.6f}" if sep_ratio else "N/A")
+    Args:
+        top_k_patches_dict: Dictionary mapping neuron_idx -> list of PIL Images
+        save_path: Path to save the PDF file (e.g., "top_patches.pdf")
+        top_x: Number of top patches to visualize per neuron
+        neurons_to_visualize: List of specific neuron indices to visualize. 
+                            If None, visualizes all neurons.
+        patches_per_row: Number of patches to display per row
+        figsize_per_patch: Size multiplier for each patch subplot
+        title_prefix: Prefix for neuron titles (e.g., "Neuron", "SAE Feature")
     
-    if return_top_patches:
-        return avg_intra, avg_inter, sep_ratio, top_k_patches
-    else:
-        return avg_intra, avg_inter, sep_ratio
+    Returns:
+        Path to the created PDF file
+    """
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Determine which neurons to visualize
+    if neurons_to_visualize is None:
+        neurons_to_visualize = sorted(top_k_patches_dict.keys())
+    
+    # Create PDF
+    with PdfPages(save_path) as pdf:
+        for neuron_idx in neurons_to_visualize:
+            if neuron_idx not in top_k_patches_dict:
+                print(f"Warning: Neuron {neuron_idx} not found in dictionary, skipping...")
+                continue
+            
+            patches = top_k_patches_dict[neuron_idx]
+            num_patches_to_show = min(top_x, len(patches))
+            
+            if num_patches_to_show == 0:
+                continue
+            
+            # Calculate grid dimensions
+            num_rows = int(np.ceil(num_patches_to_show / patches_per_row))
+            num_cols = min(patches_per_row, num_patches_to_show)
+            
+            # Create figure
+            fig_width = num_cols * figsize_per_patch
+            fig_height = num_rows * figsize_per_patch + 0.5  # Extra space for title
+            fig, axes = plt.subplots(
+                num_rows, num_cols,
+                figsize=(fig_width, fig_height)
+            )
+            
+            # Handle single row/column cases
+            if num_rows == 1 and num_cols == 1:
+                axes = np.array([[axes]])
+            elif num_rows == 1:
+                axes = axes.reshape(1, -1)
+            elif num_cols == 1:
+                axes = axes.reshape(-1, 1)
+            
+            # Add main title
+            fig.suptitle(
+                f'{title_prefix} {neuron_idx} - Top {num_patches_to_show} Activating Patches',
+                fontsize=14,
+                fontweight='bold'
+            )
+            
+            # Plot patches
+            for idx in range(num_patches_to_show):
+                row = idx // patches_per_row
+                col = idx % patches_per_row
+                ax = axes[row, col]
+                
+                # Display patch
+                ax.imshow(patches[idx])
+                ax.set_title(f'Rank {idx + 1}', fontsize=10)
+                ax.axis('off')
+            
+            # Hide unused subplots
+            for idx in range(num_patches_to_show, num_rows * num_cols):
+                row = idx // patches_per_row
+                col = idx % patches_per_row
+                axes[row, col].axis('off')
+            
+            plt.tight_layout()
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+    
+    print(f"PDF saved to: {save_path}")
+    return save_path
+
+
+def create_top_patches_pdf_compact(
+    top_k_patches_dict,
+    save_path,
+    top_x=10,
+    neurons_per_page=4,
+    neurons_to_visualize=None,
+    patches_per_row=5,
+    title_prefix="Neuron"
+):
+    """
+    Create a compact PDF with multiple neurons per page.
+    
+    Args:
+        top_k_patches_dict: Dictionary mapping neuron_idx -> list of PIL Images
+        save_path: Path to save the PDF file
+        top_x: Number of top patches to visualize per neuron
+        neurons_per_page: Number of neurons to display on each page
+        neurons_to_visualize: List of specific neuron indices to visualize.
+                            If None, visualizes all neurons.
+        patches_per_row: Number of patches to display per row per neuron
+        title_prefix: Prefix for neuron titles
+    
+    Returns:
+        Path to the created PDF file
+    """
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Determine which neurons to visualize
+    if neurons_to_visualize is None:
+        neurons_to_visualize = sorted(top_k_patches_dict.keys())
+    
+    # Create PDF
+    with PdfPages(save_path) as pdf:
+        # Process neurons in batches
+        for page_start in range(0, len(neurons_to_visualize), neurons_per_page):
+            page_neurons = neurons_to_visualize[page_start:page_start + neurons_per_page]
+            
+            # Create figure for this page
+            fig = plt.figure(figsize=(15, 3.5 * len(page_neurons)))
+            
+            for subplot_idx, neuron_idx in enumerate(page_neurons):
+                if neuron_idx not in top_k_patches_dict:
+                    continue
+                
+                patches = top_k_patches_dict[neuron_idx]
+                num_patches_to_show = min(top_x, len(patches))
+                
+                if num_patches_to_show == 0:
+                    continue
+                
+                # Create subplot for this neuron
+                num_cols = min(patches_per_row, num_patches_to_show)
+                
+                for patch_idx in range(num_patches_to_show):
+                    # Calculate subplot position
+                    subplot_position = (
+                        len(page_neurons),
+                        patches_per_row,
+                        subplot_idx * patches_per_row + patch_idx + 1
+                    )
+                    ax = fig.add_subplot(*subplot_position)
+                    
+                    # Display patch
+                    ax.imshow(patches[patch_idx])
+                    
+                    # Add title only to first patch
+                    if patch_idx == 0:
+                        ax.set_ylabel(
+                            f'{title_prefix} {neuron_idx}',
+                            fontsize=10,
+                            fontweight='bold',
+                            rotation=0,
+                            ha='right',
+                            va='center'
+                        )
+                    
+                    ax.set_title(f'{patch_idx + 1}', fontsize=8)
+                    ax.axis('off')
+            
+            plt.tight_layout()
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+    
+    print(f"Compact PDF saved to: {save_path}")
+    return save_path
